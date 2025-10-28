@@ -99,10 +99,10 @@ void BenchmarkNew(size_t ntimes, size_t nworks, size_t rounds)
 int main()
 {
     HashBucket::initMemoryPool(); // 使用内存池接口前一定要先调用该函数
-	BenchmarkMemoryPool(100, 1, 10); // 测试内存池
+	BenchmarkMemoryPool(100, 2, 10); // 测试内存池
 	std::cout << "===========================================================================" << std::endl;
 	std::cout << "===========================================================================" << std::endl;
-	BenchmarkNew(100, 1, 10); // 测试 new delete
+	BenchmarkNew(100, 2, 10); // 测试 new delete
 	
 	return 0;
 }
