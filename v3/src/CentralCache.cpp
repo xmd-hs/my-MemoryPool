@@ -18,7 +18,11 @@ Span* CentralCache::createSpan(size_t index)
 {
     const size_t blockSize = SizeClass::getSize(index);
     const size_t ps = PageCache::pageSize();
-    size_t targetBytes = std::max(ps, size_t(32 * 1024));
+    // Larger spans amortize CentralCache/PageCache synchronization for the
+    // medium-size classes that dominate mixed allocation workloads.
+    size_t targetBytes = blockSize <= 256 ? size_t(32 * 1024)
+                                         : size_t(128 * 1024);
+    targetBytes = std::max(ps, targetBytes);
     if (blockSize > targetBytes)
         targetBytes = ((blockSize + ps - 1) / ps) * ps;
     size_t numPages = targetBytes / ps;
@@ -50,7 +54,8 @@ Span* CentralCache::createSpan(size_t index)
     span->isLarge = false;
     span->next = nullptr;
     span->debugLargeAllocated = false;
-    span->debugAllocMap.assign(n, 0);
+    if constexpr (kDebugGuardsEnabled)
+        span->debugAllocMap.assign(n, 0);
     return span;
 }
 

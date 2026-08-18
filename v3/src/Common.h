@@ -20,7 +20,12 @@ namespace Kama_memoryPool
 #define KAMA_MEMORY_POOL_DEBUG_GUARDS 0
 #endif
 
+#ifndef KAMA_MEMORY_POOL_STATS_ENABLED
+#define KAMA_MEMORY_POOL_STATS_ENABLED 1
+#endif
+
 constexpr bool kDebugGuardsEnabled = KAMA_MEMORY_POOL_DEBUG_GUARDS != 0;
+constexpr bool kStatsEnabled = KAMA_MEMORY_POOL_STATS_ENABLED != 0;
 
 constexpr size_t ALIGNMENT = kAlignment;
 constexpr size_t MAX_BYTES = kMaxBytes;

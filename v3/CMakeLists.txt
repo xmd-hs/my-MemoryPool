@@ -11,6 +11,7 @@ option(KAMA_MEMORY_POOL_BUILD_SHARED "Build shared library" OFF)
 option(KAMA_MEMORY_POOL_BUILD_TESTS "Build unit and performance tests" ON)
 option(KAMA_MEMORY_POOL_BUILD_EXAMPLES "Build usage examples" ON)
 option(KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS "Enable debug validation for frees" OFF)
+option(KAMA_MEMORY_POOL_ENABLE_STATS "Enable global allocation statistics" ON)
 option(KAMA_MEMORY_POOL_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(KAMA_MEMORY_POOL_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(KAMA_MEMORY_POOL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
@@ -77,6 +78,11 @@ target_link_libraries(kama_memory_pool PUBLIC Threads::Threads)
 if(KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS)
     target_compile_definitions(kama_memory_pool PUBLIC KAMA_MEMORY_POOL_DEBUG_GUARDS=1)
 endif()
+if(KAMA_MEMORY_POOL_ENABLE_STATS)
+    target_compile_definitions(kama_memory_pool PUBLIC KAMA_MEMORY_POOL_STATS_ENABLED=1)
+else()
+    target_compile_definitions(kama_memory_pool PUBLIC KAMA_MEMORY_POOL_STATS_ENABLED=0)
+endif()
 if(KAMA_SANITIZER_FLAGS)
     target_compile_options(kama_memory_pool PUBLIC ${KAMA_SANITIZER_FLAGS})
     target_link_options(kama_memory_pool PUBLIC ${KAMA_SANITIZER_FLAGS})
@@ -106,7 +112,7 @@ if(KAMA_MEMORY_POOL_BUILD_TESTS)
     add_test(NAME kama_unit_test COMMAND $<TARGET_FILE:unit_test>)
     add_test(NAME kama_perf_smoke COMMAND $<TARGET_FILE:perf_test>)
 
-    add_custom_target(test
+    add_custom_target(run_unit_tests
         COMMAND $<TARGET_FILE:unit_test>
         DEPENDS unit_test
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}

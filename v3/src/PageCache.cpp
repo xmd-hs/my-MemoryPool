@@ -76,7 +76,11 @@ void* PageCache::systemAlloc(size_t& numPages)
 {
     const size_t ps = systemPageSize();
     const size_t gran = systemAllocGranularity();
+    if (numPages > SIZE_MAX / ps)
+        return nullptr;
     size_t bytes = numPages * ps;
+    if (bytes > SIZE_MAX - (gran - 1))
+        return nullptr;
     bytes = (bytes + gran - 1) & ~(gran - 1);
     numPages = bytes / ps;
 
@@ -166,7 +170,11 @@ void PageCache::deallocateSpan(Span* span)
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    const bool returnDirect = span->isLarge;
+    // A large allocation may have been carved from a larger origin span.
+    // Release the origin directly only when this span owns the whole origin.
+    const bool returnDirect = span->isLarge &&
+                              span->pageAddr == span->originAddr &&
+                              span->numPages == span->originPages;
     span->freeList = nullptr;
     span->blockSize = 0;
     span->blockCount = 0;

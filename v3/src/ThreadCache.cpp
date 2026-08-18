@@ -24,7 +24,9 @@ size_t debugBlockIndex(const Span* span, const void* ptr)
 
 bool debugMarkAllocated(Span* span, void* ptr)
 {
-    if (!kDebugGuardsEnabled || !span || span->isLarge)
+    if constexpr (!kDebugGuardsEnabled)
+        return true;
+    if (!span || span->isLarge)
         return true;
 
     const size_t blockIndex = debugBlockIndex(span, ptr);
@@ -93,13 +95,13 @@ void ThreadCache::flushAll()
 
 size_t ThreadCache::maxCachedBlocks(size_t size) const
 {
-    constexpr size_t kBaseCacheBytes = 48 * 1024;
+    constexpr size_t kBaseCacheBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kBaseCacheBytes / std::max(size, ALIGNMENT));
-    if (size <= 32) return std::min(n, size_t(512));
-    if (size <= 64) return std::min(n, size_t(256));
-    if (size <= 256) return std::min(n, size_t(128));
-    if (size <= 1024) return std::min(n, size_t(64));
-    return std::min(n, size_t(32));
+    if (size <= 32) return std::min(n, size_t(4096));
+    if (size <= 64) return std::min(n, size_t(2048));
+    if (size <= 256) return std::min(n, size_t(1024));
+    if (size <= 1024) return std::min(n, size_t(256));
+    return std::min(n, size_t(128));
 }
 
 bool ThreadCache::shouldReturnToCentralCache(size_t index) const
@@ -109,13 +111,13 @@ bool ThreadCache::shouldReturnToCentralCache(size_t index) const
 
 size_t ThreadCache::getBatchNum(size_t size) const
 {
-    constexpr size_t kMaxBatchBytes = 12 * 1024;
+    constexpr size_t kMaxBatchBytes = 64 * 1024;
     size_t n = std::max(size_t(1), kMaxBatchBytes / std::max(size, ALIGNMENT));
-    if (size <= 32) n = std::min(n, size_t(96));
-    else if (size <= 64) n = std::min(n, size_t(32));
-    else if (size <= 256) n = std::min(n, size_t(16));
-    else if (size <= 1024) n = std::min(n, size_t(8));
-    else n = std::min(n, size_t(4));
+    if (size <= 32) n = std::min(n, size_t(512));
+    else if (size <= 64) n = std::min(n, size_t(256));
+    else if (size <= 256) n = std::min(n, size_t(128));
+    else if (size <= 1024) n = std::min(n, size_t(32));
+    else n = std::min(n, size_t(16));
     return std::max(size_t(1), n);
 }
 
@@ -127,6 +129,8 @@ void* ThreadCache::allocate(size_t size)
     if (size > MAX_BYTES)
     {
         const size_t ps = PageCache::pageSize();
+        if (size > SIZE_MAX - (ps - 1))
+            return nullptr;
         size_t numPages = (size + ps - 1) / ps;
         Span* span = PageCache::getInstance().allocateSpan(numPages);
         if (!span)
@@ -160,10 +164,12 @@ void* ThreadCache::allocate(size_t size)
 
 void* ThreadCache::allocateAligned(size_t size, size_t alignment)
 {
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
+        return nullptr;
     if (alignment <= ALIGNMENT)
         return allocate(size);
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
-        alignment = ALIGNMENT;
+    if (size > SIZE_MAX - (alignment - 1))
+        return nullptr;
 
     size_t need = (size + alignment - 1) & ~(alignment - 1);
     return allocate(need);
@@ -276,7 +282,7 @@ void ThreadCache::returnToCentralCache(size_t index)
     if (batchNum <= 1)
         return;
 
-    size_t keepNum = std::max(batchNum / 4, size_t(1));
+    size_t keepNum = std::max(batchNum / 2, size_t(1));
     keepNum = std::min(keepNum, maxCachedBlocks(SizeClass::getSize(index)));
     if (keepNum >= batchNum)
         return;

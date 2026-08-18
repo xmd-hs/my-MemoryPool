@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -41,6 +42,7 @@ struct ScenarioResult
 {
     std::vector<double> memPoolRuns;
     std::vector<double> systemRuns;
+    std::vector<double> mallocRuns;
 };
 
 void printRunSummary(const std::string& name, const ScenarioResult& result)
@@ -56,8 +58,114 @@ void printRunSummary(const std::string& name, const ScenarioResult& result)
         std::cout << ' ' << std::fixed << std::setprecision(3) << value;
     std::cout << " ms\n";
 
+    if (!result.mallocRuns.empty())
+    {
+        std::cout << "  Malloc/Free runs:";
+        for (double value : result.mallocRuns)
+            std::cout << ' ' << std::fixed << std::setprecision(3) << value;
+        std::cout << " ms\n";
+    }
+
     std::cout << "  Median: pool " << median(result.memPoolRuns)
               << " ms vs system " << median(result.systemRuns) << " ms\n";
+    if (!result.mallocRuns.empty())
+        std::cout << "  Median: malloc " << median(result.mallocRuns) << " ms\n";
+}
+
+double runMallocSmallObjects()
+{
+    constexpr size_t kAllocations = 100000;
+    constexpr size_t kObjectSize = 32;
+    Timer timer;
+    std::vector<void*> ptrs;
+    ptrs.reserve(kAllocations);
+    for (size_t i = 0; i < kAllocations; ++i)
+    {
+        void* ptr = std::malloc(kObjectSize);
+        if (!ptr)
+            return -1.0;
+        ptrs.push_back(ptr);
+        if ((i & 3u) == 0)
+        {
+            std::free(ptrs.back());
+            ptrs.pop_back();
+        }
+    }
+    for (void* ptr : ptrs)
+        std::free(ptr);
+    return timer.elapsedMs();
+}
+
+double runMallocMultiThreaded(uint32_t seedBase)
+{
+    constexpr size_t kThreadCount = 4;
+    constexpr size_t kAllocationsPerThread = 25000;
+    Timer timer;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreadCount);
+    for (size_t tid = 0; tid < kThreadCount; ++tid)
+    {
+        threads.emplace_back([seed = seedBase + static_cast<uint32_t>(tid),
+                              kAllocationsPerThread]() {
+            std::mt19937 rng(seed);
+            std::uniform_int_distribution<size_t> sizeDist(8, 256);
+            std::uniform_int_distribution<int> releaseDist(0, 99);
+            std::vector<std::pair<void*, size_t>> ptrs;
+            ptrs.reserve(kAllocationsPerThread);
+            for (size_t i = 0; i < kAllocationsPerThread; ++i)
+            {
+                const size_t size = sizeDist(rng);
+                void* ptr = std::malloc(size);
+                if (!ptr)
+                    continue;
+                ptrs.emplace_back(ptr, size);
+                if (releaseDist(rng) < 75)
+                {
+                    std::uniform_int_distribution<size_t> pick(0, ptrs.size() - 1);
+                    const size_t index = pick(rng);
+                    std::free(ptrs[index].first);
+                    ptrs[index] = ptrs.back();
+                    ptrs.pop_back();
+                }
+            }
+            for (const auto& item : ptrs)
+                std::free(item.first);
+        });
+    }
+    for (auto& thread : threads)
+        thread.join();
+    return timer.elapsedMs();
+}
+
+double runMallocMixedSizes(uint32_t seed)
+{
+    constexpr size_t kAllocations = 50000;
+    constexpr std::array<size_t, 8> kSizes{16, 32, 64, 128, 256, 512, 1024, 2048};
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<size_t> pick(0, kSizes.size() - 1);
+    Timer timer;
+    std::vector<std::pair<void*, size_t>> ptrs;
+    ptrs.reserve(kAllocations);
+    for (size_t i = 0; i < kAllocations; ++i)
+    {
+        const size_t size = kSizes[pick(rng)];
+        void* ptr = std::malloc(size);
+        if (!ptr)
+            return -1.0;
+        ptrs.emplace_back(ptr, size);
+        if (i % 100 == 0)
+        {
+            const size_t releaseCount = std::min(ptrs.size(), size_t(20));
+            for (size_t j = 0; j < releaseCount; ++j)
+            {
+                std::free(ptrs.back().first);
+                ptrs.pop_back();
+            }
+        }
+    }
+    for (const auto& item : ptrs)
+        std::free(item.first);
+    return timer.elapsedMs();
 }
 
 void warmup()
@@ -169,7 +277,9 @@ double runMultiThreaded(bool useMemPool, uint32_t seedBase)
 
     for (size_t tid = 0; tid < kThreadCount; ++tid)
     {
-        threads.emplace_back([useMemPool, seed = seedBase + static_cast<uint32_t>(tid)]() {
+        threads.emplace_back([useMemPool,
+                              seed = seedBase + static_cast<uint32_t>(tid),
+                              kAllocationsPerThread]() {
             std::mt19937 rng(seed);
             std::uniform_int_distribution<size_t> sizeDist(8, 256);
             std::uniform_int_distribution<int> releaseDist(0, 99);
@@ -213,8 +323,7 @@ double runMultiThreaded(bool useMemPool, uint32_t seedBase)
     return timer.elapsedMs();
 }
 
-ScenarioResult measureScenario(const std::string& name,
-                               double (*memPoolRun)(bool),
+ScenarioResult measureScenario(double (*memPoolRun)(bool),
                                double (*systemRun)(bool),
                                size_t repeats)
 {
@@ -228,7 +337,6 @@ ScenarioResult measureScenario(const std::string& name,
         result.systemRuns.push_back(systemRun(false));
     }
 
-    printRunSummary(name, result);
     return result;
 }
 
@@ -241,17 +349,19 @@ int main()
     std::cout << "Starting performance tests...\n";
     warmup();
 
-    ScenarioResult small = measureScenario("Small objects (32B x 100000)",
-                                           runSmallObjects,
+    ScenarioResult small = measureScenario(runSmallObjects,
                                            runSmallObjects,
                                            kRepeats);
-    (void)small;
+    for (size_t i = 0; i < kRepeats; ++i)
+        small.mallocRuns.push_back(runMallocSmallObjects());
+    printRunSummary("Small objects (32B x 100000)", small);
 
     ScenarioResult multi;
     for (size_t i = 0; i < kRepeats; ++i)
     {
         multi.memPoolRuns.push_back(runMultiThreaded(true, 0x1000u + static_cast<uint32_t>(i * 17)));
         multi.systemRuns.push_back(runMultiThreaded(false, 0x1000u + static_cast<uint32_t>(i * 17)));
+        multi.mallocRuns.push_back(runMallocMultiThreaded(0x1000u + static_cast<uint32_t>(i * 17)));
     }
     printRunSummary("Multi-threaded (4 threads x 25000)", multi);
 
@@ -260,6 +370,7 @@ int main()
     {
         mixed.memPoolRuns.push_back(runMixedSizes(true, 0x2000u + static_cast<uint32_t>(i * 17)));
         mixed.systemRuns.push_back(runMixedSizes(false, 0x2000u + static_cast<uint32_t>(i * 17)));
+        mixed.mallocRuns.push_back(runMallocMixedSizes(0x2000u + static_cast<uint32_t>(i * 17)));
     }
     printRunSummary("Mixed sizes (50000 allocs)", mixed);
 

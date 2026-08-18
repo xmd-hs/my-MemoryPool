@@ -21,6 +21,8 @@ std::atomic<std::uint64_t> g_centralFlushCount{0};
 
 void recordAllocation(size_t size)
 {
+    if constexpr (!kStatsEnabled)
+        return;
     g_allocCount.fetch_add(1, std::memory_order_relaxed);
     if (size > MAX_BYTES)
         g_largeAllocCount.fetch_add(1, std::memory_order_relaxed);
@@ -30,6 +32,8 @@ void recordAllocation(size_t size)
 
 void recordFree(bool sized)
 {
+    if constexpr (!kStatsEnabled)
+        return;
     g_freeCount.fetch_add(1, std::memory_order_relaxed);
     if (sized)
         g_sizedFreeCount.fetch_add(1, std::memory_order_relaxed);
@@ -39,11 +43,15 @@ void recordFree(bool sized)
 
 void recordCentralRefill(size_t count)
 {
+    if constexpr (!kStatsEnabled)
+        return;
     g_centralRefillCount.fetch_add(count, std::memory_order_relaxed);
 }
 
 void recordCentralFlush(size_t count)
 {
+    if constexpr (!kStatsEnabled)
+        return;
     g_centralFlushCount.fetch_add(count, std::memory_order_relaxed);
 }
 
@@ -82,6 +90,8 @@ void MemoryPool::deallocate(void* ptr, std::size_t size)
 MemoryPoolStats MemoryPool::stats()
 {
     MemoryPoolStats out;
+    if constexpr (!kStatsEnabled)
+        return out;
     out.allocCount = g_allocCount.load(std::memory_order_relaxed);
     out.freeCount = g_freeCount.load(std::memory_order_relaxed);
     out.liveAllocs = out.allocCount > out.freeCount ? out.allocCount - out.freeCount : 0;

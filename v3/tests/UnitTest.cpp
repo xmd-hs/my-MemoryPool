@@ -7,6 +7,7 @@
 #include <thread>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <algorithm>
 #include <atomic>
@@ -72,7 +73,7 @@ void testMultiThreading()
     const int ALLOCS_PER_THREAD = 1000;
     std::atomic<bool> has_error{false};
     
-    auto threadFunc = [&has_error]() 
+    auto threadFunc = [&has_error, ALLOCS_PER_THREAD]() 
     {
         try 
         {
@@ -288,6 +289,12 @@ void testStatsAndSizedFreePath()
 {
     std::cout << "Running stats / sized free test..." << std::endl;
 
+    if constexpr (!kStatsEnabled)
+    {
+        std::cout << "Statistics disabled, skipping." << std::endl;
+        return;
+    }
+
     const MemoryPoolStats before = MemoryPool::stats();
 
     void* p1 = MemoryPool::allocate(24);
@@ -442,6 +449,104 @@ void testDebugGuards()
     std::cout << "Debug guard test passed!" << std::endl;
 }
 
+void testLargeSpanLifetime()
+{
+    std::cout << "Running large span lifetime test..." << std::endl;
+
+    void* first = MemoryPool::allocate(300 * 1024);
+    assert(first != nullptr);
+    MemoryPool::deallocate(first);
+
+    void* reused = MemoryPool::allocate(280 * 1024);
+    void* neighbor = MemoryPool::allocate(16 * 1024);
+    assert(reused != nullptr);
+    assert(neighbor != nullptr);
+    static_cast<unsigned char*>(neighbor)[0] = 0x5a;
+    MemoryPool::deallocate(reused);
+    static_cast<unsigned char*>(neighbor)[0] = 0xa5;
+    MemoryPool::deallocate(neighbor);
+
+    std::cout << "Large span lifetime test passed!" << std::endl;
+}
+
+void testInvalidInputs()
+{
+    std::cout << "Running invalid input test..." << std::endl;
+    assert(MemoryPool::allocateAligned(64, 0) == nullptr);
+    assert(MemoryPool::allocateAligned(64, 3) == nullptr);
+    assert(MemoryPool::allocateAligned(SIZE_MAX, 64) == nullptr);
+    assert(MemoryPool::allocate(SIZE_MAX) == nullptr);
+    std::cout << "Invalid input test passed!" << std::endl;
+}
+
+void testAlignmentSweep()
+{
+    std::cout << "Running alignment sweep test..." << std::endl;
+    for (size_t alignment : {size_t(8), size_t(16), size_t(32), size_t(64),
+                             size_t(128), size_t(256), size_t(512), size_t(4096)})
+    {
+        for (size_t size : {size_t(1), size_t(7), size_t(31), size_t(255),
+                            size_t(1023), size_t(4097), size_t(64 * 1024)})
+        {
+            void* ptr = MemoryPool::allocateAligned(size, alignment);
+            assert(ptr != nullptr);
+            assert((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0);
+            std::memset(ptr, 0xa5, size);
+            MemoryPool::deallocate(ptr);
+        }
+    }
+    std::cout << "Alignment sweep test passed!" << std::endl;
+}
+
+void testEverySizeClassBoundary()
+{
+    std::cout << "Running size class boundary test..." << std::endl;
+    for (size_t index = 0; index < SizeClass::classCount(); ++index)
+    {
+        const size_t boundary = SizeClass::getSize(index);
+        for (size_t size : {boundary > 1 ? boundary - 1 : boundary, boundary})
+        {
+            void* ptr = MemoryPool::allocate(size);
+            assert(ptr != nullptr);
+            std::memset(ptr, static_cast<int>(index), size);
+            MemoryPool::deallocate(ptr, size);
+        }
+    }
+    std::cout << "Size class boundary test passed!" << std::endl;
+}
+
+void testLongRandomTraffic()
+{
+    std::cout << "Running long random traffic test..." << std::endl;
+    std::mt19937 rng(0x51a7u);
+    std::uniform_int_distribution<size_t> sizeDist(1, 256 * 1024);
+    std::vector<std::pair<void*, size_t>> live;
+    live.reserve(8192);
+
+    for (size_t i = 0; i < 100000; ++i)
+    {
+        if (!live.empty() && (rng() % 3u == 0))
+        {
+            const size_t index = rng() % live.size();
+            MemoryPool::deallocate(live[index].first, live[index].second);
+            live[index] = live.back();
+            live.pop_back();
+        }
+        else
+        {
+            const size_t size = sizeDist(rng);
+            void* ptr = MemoryPool::allocate(size);
+            assert(ptr != nullptr);
+            static_cast<unsigned char*>(ptr)[0] = 0x3c;
+            live.emplace_back(ptr, size);
+        }
+    }
+
+    for (const auto& item : live)
+        MemoryPool::deallocate(item.first, item.second);
+    std::cout << "Long random traffic test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
@@ -463,6 +568,11 @@ int main()
         testNewElementExceptionSafety();
         testNoLeaksAfterMixedTraffic();
         testDebugGuards();
+        testLargeSpanLifetime();
+        testInvalidInputs();
+        testAlignmentSweep();
+        testEverySizeClassBoundary();
+        testLongRandomTraffic();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;
