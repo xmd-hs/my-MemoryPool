@@ -63,6 +63,10 @@ cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DKAMA_MEMORY_POOL_BUILD_SHARED=OFF \
       -DKAMA_MEMORY_POOL_BUILD_TESTS=ON \
       -DKAMA_MEMORY_POOL_BUILD_EXAMPLES=ON \
+      -DKAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF \
+      -DKAMA_MEMORY_POOL_ENABLE_ASAN=OFF \
+      -DKAMA_MEMORY_POOL_ENABLE_UBSAN=OFF \
+      -DKAMA_MEMORY_POOL_ENABLE_TSAN=OFF \
       ..
 ```
 
@@ -95,6 +99,7 @@ lib/cmake/KamaMemoryPool/...
 ```bash
 cmake --build . --target test    # 单元测试
 cmake --build . --target perf    # 性能对照
+ctest --output-on-failure        # 标准 CTest 入口
 ./kama_example                   # SDK 最小示例
 ```
 
@@ -156,6 +161,10 @@ void demo()
 }
 ```
 
+`stats()` 还会返回 `smallAllocCount`、`largeAllocCount`、`sizedFreeCount`、
+`unsizedFreeCount`、`centralRefillCount` 和 `centralFlushCount`，方便观察
+热点路径是否主要走了线程本地缓存与带 size 释放。
+
 超过 16 字节对齐的类型会走 `allocateAligned`：
 
 ```cpp
@@ -191,6 +200,7 @@ kama_free_sized(q, 64);
 
 - 用池分配的指针必须用池释放，不要和 `malloc` / `free`、`new` / `delete` 混用。
 - `deallocate(ptr)` 通过页映射识别块大小，跨线程释放是安全的。
+- 如需更强的调试保护，可打开 `KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=ON`，对重复释放、span 内部偏移指针和明显的外部指针误传做额外校验。
 - 小对象上限是 256KB（`kMaxBytes`）；更大的请求按页向操作系统申请，释放时整段归还。
 - 默认最小对齐 8 字节（`kAlignment`）。
 - 当前版本号：`1.0.0`（`KAMA_MEMORY_POOL_VERSION`）。
@@ -293,4 +303,4 @@ Apple 平台的系统分配器本身很快，下列数字用来对比本仓库�
 
 - **v1** 适合说明「定长池在单线程能赢」，也适合说明「一把全局锁在多线程会输得很明显」。
 - **v2 / v3** 热路径走线程本地缓存，多线程不再像 v1 那样随线程数崩溃，但在 Apple libmalloc 上仍可能略慢。池的价值更多在：稳定的 size class、可归还 OS、跨平台页分配、以及 malloc 较慢的环境（部分 Linux glibc、高碎片服务）。
-- 复现：在对应目录编译后运行 `unit_test` / `perf_test`。v1 已对 `new`/`delete` 做防优化处理（函数指针 + compiler barrier），否则 `-O2` 会把空对象的 new/delete 整段消掉。
+- 复现：在对应目录编译后运行 `unit_test` / `perf_test`。`v3/perf_test` 现在使用固定 seed、线程局部随机数和多轮中位数输出，更适合比较不同优化前后的波动。v1 已对 `new`/`delete` 做防优化处理（函数指针 + compiler barrier），否则 `-O2` 会把空对象的 new/delete 整段消掉。

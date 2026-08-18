@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,6 +29,9 @@ struct Span
     Span* next = nullptr;
     bool  inFreeList = false;
     bool  isLarge = false;
+
+    std::vector<std::uint8_t> debugAllocMap;
+    bool debugLargeAllocated = false;
 };
 
 class PageCache
@@ -58,12 +62,13 @@ private:
     void  unregisterPages(Span* span);
     void  redirectPages(Span* from, Span* to);
     void  releaseOrigin(Span* span);
-    Span* findSpanLocked(void* ptr);
+    Span* findSpanLocked(void* ptr) const;
     uintptr_t pageId(void* ptr) const;
 
     std::map<size_t, Span*> freeSpans_;
     std::unordered_map<uintptr_t, Span*> pageMap_;
     std::vector<std::pair<void*, size_t>> systemAllocs_;
+    mutable std::shared_mutex pageMapMutex_;
     std::mutex mutex_;
 };
 

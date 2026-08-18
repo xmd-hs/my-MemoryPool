@@ -10,6 +10,7 @@
 #include <random>
 #include <algorithm>
 #include <atomic>
+#include <stdexcept>
 
 using namespace Kama_memoryPool;
 
@@ -283,6 +284,164 @@ void testSdkWrappers()
     std::cout << "SDK wrapper test passed!" << std::endl;
 }
 
+void testStatsAndSizedFreePath()
+{
+    std::cout << "Running stats / sized free test..." << std::endl;
+
+    const MemoryPoolStats before = MemoryPool::stats();
+
+    void* p1 = MemoryPool::allocate(24);
+    void* p2 = MemoryPool::allocate(512 * 1024);
+    assert(p1 != nullptr);
+    assert(p2 != nullptr);
+
+    MemoryPool::deallocate(p1, 24);
+    MemoryPool::deallocate(p2, 512 * 1024);
+
+    const MemoryPoolStats after = MemoryPool::stats();
+    assert(after.allocCount >= before.allocCount + 2);
+    assert(after.freeCount >= before.freeCount + 2);
+    assert(after.smallAllocCount >= before.smallAllocCount + 1);
+    assert(after.largeAllocCount >= before.largeAllocCount + 1);
+    assert(after.sizedFreeCount >= before.sizedFreeCount + 2);
+    assert(after.centralRefillCount >= before.centralRefillCount);
+    assert(after.centralFlushCount >= before.centralFlushCount);
+
+    std::cout << "Stats / sized free test passed!" << std::endl;
+}
+
+void testCrossThreadSizedFree()
+{
+    std::cout << "Running cross-thread sized free test..." << std::endl;
+
+    std::vector<void*> ptrs;
+    ptrs.reserve(1024);
+    for (int i = 0; i < 1024; ++i)
+    {
+        void* p = MemoryPool::allocate(64);
+        assert(p != nullptr);
+        ptrs.push_back(p);
+    }
+
+    std::thread releaser([&ptrs]() {
+        for (void* p : ptrs)
+            MemoryPool::deallocate(p, 64);
+    });
+    releaser.join();
+
+    void* p = MemoryPool::allocate(64);
+    assert(p != nullptr);
+    MemoryPool::deallocate(p, 64);
+
+    std::cout << "Cross-thread sized free test passed!" << std::endl;
+}
+
+void testNewElementExceptionSafety()
+{
+    std::cout << "Running newElement exception safety test..." << std::endl;
+
+    struct ThrowOnConstruct
+    {
+        ThrowOnConstruct() { throw std::runtime_error("boom"); }
+    };
+
+    const MemoryPoolStats before = MemoryPool::stats();
+    bool thrown = false;
+    try
+    {
+        (void)MemoryPool::newElement<ThrowOnConstruct>();
+    }
+    catch (const std::runtime_error&)
+    {
+        thrown = true;
+    }
+    assert(thrown);
+
+    const MemoryPoolStats after = MemoryPool::stats();
+    assert(after.allocCount >= before.allocCount + 1);
+    assert(after.freeCount >= before.freeCount + 1);
+    assert(after.liveAllocs == before.liveAllocs);
+
+    std::cout << "newElement exception safety test passed!" << std::endl;
+}
+
+void testNoLeaksAfterMixedTraffic()
+{
+    std::cout << "Running no-leak mixed traffic test..." << std::endl;
+
+    const MemoryPoolStats before = MemoryPool::stats();
+
+    {
+        std::vector<std::pair<void*, size_t>> ptrs;
+        ptrs.reserve(4096);
+
+        for (size_t i = 1; i <= 2048; ++i)
+        {
+            const size_t size = (i % 2 == 0) ? ((i % 256) + 1) * 8 : (64 + (i % 8) * 64);
+            void* p = MemoryPool::allocate(size);
+            assert(p != nullptr);
+            ptrs.emplace_back(p, size);
+        }
+
+        for (size_t i = 0; i < ptrs.size(); i += 3)
+            MemoryPool::deallocate(ptrs[i].first, ptrs[i].second);
+
+        std::vector<std::thread> threads;
+        for (size_t t = 0; t < 4; ++t)
+        {
+            threads.emplace_back([&, t]() {
+                for (size_t i = t; i < ptrs.size(); i += 4)
+                {
+                    if (i % 3 != 0)
+                        MemoryPool::deallocate(ptrs[i].first, ptrs[i].second);
+                }
+            });
+        }
+        for (auto& thread : threads)
+            thread.join();
+    }
+
+    void* big = MemoryPool::allocate(1024 * 1024);
+    assert(big != nullptr);
+    MemoryPool::deallocate(big, 1024 * 1024);
+
+    const MemoryPoolStats after = MemoryPool::stats();
+    assert(after.liveAllocs == before.liveAllocs);
+
+    std::cout << "No-leak mixed traffic test passed!" << std::endl;
+}
+
+void testDebugGuards()
+{
+    std::cout << "Running debug guard test..." << std::endl;
+
+    if constexpr (!kDebugGuardsEnabled)
+    {
+        std::cout << "Debug guards disabled, skipping." << std::endl;
+        return;
+    }
+
+    const MemoryPoolStats before = MemoryPool::stats();
+
+    void* p = MemoryPool::allocate(64);
+    assert(p != nullptr);
+    MemoryPool::deallocate(p, 64);
+    MemoryPool::deallocate(p, 64); // double free should be rejected
+
+    void* q = MemoryPool::allocate(64);
+    assert(q != nullptr);
+    MemoryPool::deallocate(static_cast<char*>(q) + 8, 64); // interior pointer should be rejected
+    MemoryPool::deallocate(q, 64);
+
+    alignas(64) char foreign[64]{};
+    MemoryPool::deallocate(foreign, 64); // foreign pointer should be ignored
+
+    const MemoryPoolStats after = MemoryPool::stats();
+    assert(after.liveAllocs == before.liveAllocs);
+
+    std::cout << "Debug guard test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
@@ -299,6 +458,11 @@ int main()
         testAlignedAndTyped();
         testThreadExitReturnsMemory();
         testSdkWrappers();
+        testStatsAndSizedFreePath();
+        testCrossThreadSizedFree();
+        testNewElementExceptionSafety();
+        testNoLeaksAfterMixedTraffic();
+        testDebugGuards();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;

@@ -16,8 +16,8 @@ public:
 
     void* allocate(size_t size);
     void* allocateAligned(size_t size, size_t alignment);
-    void deallocate(void* ptr);
-    void deallocate(void* ptr, size_t size);
+    bool deallocate(void* ptr);
+    bool deallocate(void* ptr, size_t size);
 
 private:
     ThreadCache();

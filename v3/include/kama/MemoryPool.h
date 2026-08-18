@@ -18,6 +18,12 @@ struct MemoryPoolStats
     std::uint64_t allocCount{0};
     std::uint64_t freeCount{0};
     std::uint64_t liveAllocs{0};
+    std::uint64_t smallAllocCount{0};
+    std::uint64_t largeAllocCount{0};
+    std::uint64_t sizedFreeCount{0};
+    std::uint64_t unsizedFreeCount{0};
+    std::uint64_t centralRefillCount{0};
+    std::uint64_t centralFlushCount{0};
 };
 
 class KAMA_API MemoryPool
@@ -38,7 +44,15 @@ public:
                         : allocateAligned(sizeof(T), align);
         if (!mem)
             return nullptr;
-        return ::new (mem) T(std::forward<Args>(args)...);
+        try
+        {
+            return ::new (mem) T(std::forward<Args>(args)...);
+        }
+        catch (...)
+        {
+            deallocate(mem);
+            throw;
+        }
     }
 
     template<typename T>

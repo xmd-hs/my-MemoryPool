@@ -10,6 +10,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(KAMA_MEMORY_POOL_BUILD_SHARED "Build shared library" OFF)
 option(KAMA_MEMORY_POOL_BUILD_TESTS "Build unit and performance tests" ON)
 option(KAMA_MEMORY_POOL_BUILD_EXAMPLES "Build usage examples" ON)
+option(KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS "Enable debug validation for frees" OFF)
+option(KAMA_MEMORY_POOL_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(KAMA_MEMORY_POOL_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(KAMA_MEMORY_POOL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 if(MSVC)
     add_compile_options(/W4 /utf-8)
@@ -18,6 +22,23 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+
+if(KAMA_MEMORY_POOL_ENABLE_TSAN AND (KAMA_MEMORY_POOL_ENABLE_ASAN OR KAMA_MEMORY_POOL_ENABLE_UBSAN))
+    message(FATAL_ERROR "TSan cannot be combined with ASan/UBSan")
+endif()
+
+set(KAMA_SANITIZER_FLAGS)
+if(NOT MSVC)
+    if(KAMA_MEMORY_POOL_ENABLE_ASAN)
+        list(APPEND KAMA_SANITIZER_FLAGS -fsanitize=address)
+    endif()
+    if(KAMA_MEMORY_POOL_ENABLE_UBSAN)
+        list(APPEND KAMA_SANITIZER_FLAGS -fsanitize=undefined)
+    endif()
+    if(KAMA_MEMORY_POOL_ENABLE_TSAN)
+        list(APPEND KAMA_SANITIZER_FLAGS -fsanitize=thread)
+    endif()
+endif()
 
 set(KAMA_SRC
     src/MemoryPool.cpp
@@ -53,6 +74,13 @@ target_include_directories(kama_memory_pool
 )
 
 target_link_libraries(kama_memory_pool PUBLIC Threads::Threads)
+if(KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS)
+    target_compile_definitions(kama_memory_pool PUBLIC KAMA_MEMORY_POOL_DEBUG_GUARDS=1)
+endif()
+if(KAMA_SANITIZER_FLAGS)
+    target_compile_options(kama_memory_pool PUBLIC ${KAMA_SANITIZER_FLAGS})
+    target_link_options(kama_memory_pool PUBLIC ${KAMA_SANITIZER_FLAGS})
+endif()
 
 set_target_properties(kama_memory_pool PROPERTIES
     OUTPUT_NAME kama_memory_pool
@@ -62,11 +90,21 @@ set_target_properties(kama_memory_pool PROPERTIES
 )
 
 if(KAMA_MEMORY_POOL_BUILD_TESTS)
+    enable_testing()
     add_executable(unit_test tests/UnitTest.cpp)
     add_executable(perf_test tests/PerformanceTest.cpp)
     target_link_libraries(unit_test PRIVATE kama_memory_pool)
     target_link_libraries(perf_test PRIVATE kama_memory_pool)
     target_include_directories(unit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(KAMA_SANITIZER_FLAGS)
+        target_compile_options(unit_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+        target_compile_options(perf_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+        target_link_options(unit_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+        target_link_options(perf_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+    endif()
+
+    add_test(NAME kama_unit_test COMMAND $<TARGET_FILE:unit_test>)
+    add_test(NAME kama_perf_smoke COMMAND $<TARGET_FILE:perf_test>)
 
     add_custom_target(test
         COMMAND $<TARGET_FILE:unit_test>

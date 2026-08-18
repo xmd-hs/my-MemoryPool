@@ -23,7 +23,7 @@ public:
         return instance;
     }
 
-    void* fetchRange(size_t index, size_t batchNum);
+    void* fetchRange(size_t index, size_t batchNum, size_t& fetchedCount);
     void returnRange(void* start, size_t blockCount, size_t index);
 
 private:

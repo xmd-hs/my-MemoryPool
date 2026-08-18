@@ -16,6 +16,12 @@
 namespace Kama_memoryPool
 {
 
+#ifndef KAMA_MEMORY_POOL_DEBUG_GUARDS
+#define KAMA_MEMORY_POOL_DEBUG_GUARDS 0
+#endif
+
+constexpr bool kDebugGuardsEnabled = KAMA_MEMORY_POOL_DEBUG_GUARDS != 0;
+
 constexpr size_t ALIGNMENT = kAlignment;
 constexpr size_t MAX_BYTES = kMaxBytes;
 constexpr size_t kMaxSizeClasses = 64;
@@ -141,5 +147,10 @@ public:
         return lo;
     }
 };
+
+void recordAllocation(size_t size);
+void recordFree(bool sized);
+void recordCentralRefill(size_t count);
+void recordCentralFlush(size_t count);
 
 } // namespace Kama_memoryPool

@@ -49,6 +49,8 @@ Span* CentralCache::createSpan(size_t index)
     span->sizeClass = index;
     span->isLarge = false;
     span->next = nullptr;
+    span->debugLargeAllocated = false;
+    span->debugAllocMap.assign(n, 0);
     return span;
 }
 
@@ -67,8 +69,9 @@ void CentralCache::unlinkPartial(size_t index, Span* span)
     }
 }
 
-void* CentralCache::fetchRange(size_t index, size_t batchNum)
+void* CentralCache::fetchRange(size_t index, size_t batchNum, size_t& fetchedCount)
 {
+    fetchedCount = 0;
     if (index >= FREE_LIST_SIZE || batchNum == 0)
         return nullptr;
 
@@ -108,6 +111,7 @@ void* CentralCache::fetchRange(size_t index, size_t batchNum)
         }
     }
 
+    fetchedCount = got;
     return head;
 }
 

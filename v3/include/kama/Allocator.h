@@ -3,6 +3,7 @@
 #include "MemoryPool.h"
 
 #include <cstddef>
+#include <limits>
 #include <new>
 #include <type_traits>
 
@@ -28,6 +29,8 @@ public:
     {
         if (n == 0)
             return nullptr;
+        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
+            throw std::bad_array_new_length();
         void* p = MemoryPool::allocateAligned(n * sizeof(T), alignof(T));
         if (!p)
             throw std::bad_alloc();

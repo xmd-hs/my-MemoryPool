@@ -31,6 +31,7 @@ uintptr_t PageCache::pageId(void* ptr) const
 
 void PageCache::registerPages(Span* span)
 {
+    std::unique_lock<std::shared_mutex> lock(pageMapMutex_);
     const size_t ps = systemPageSize();
     auto id = reinterpret_cast<uintptr_t>(span->pageAddr) / ps;
     for (size_t i = 0; i < span->numPages; ++i)
@@ -39,6 +40,7 @@ void PageCache::registerPages(Span* span)
 
 void PageCache::unregisterPages(Span* span)
 {
+    std::unique_lock<std::shared_mutex> lock(pageMapMutex_);
     const size_t ps = systemPageSize();
     auto id = reinterpret_cast<uintptr_t>(span->pageAddr) / ps;
     for (size_t i = 0; i < span->numPages; ++i)
@@ -47,13 +49,14 @@ void PageCache::unregisterPages(Span* span)
 
 void PageCache::redirectPages(Span* from, Span* to)
 {
+    std::unique_lock<std::shared_mutex> lock(pageMapMutex_);
     const size_t ps = systemPageSize();
     auto id = reinterpret_cast<uintptr_t>(from->pageAddr) / ps;
     for (size_t i = 0; i < from->numPages; ++i)
         pageMap_[id + i] = to;
 }
 
-Span* PageCache::findSpanLocked(void* ptr)
+Span* PageCache::findSpanLocked(void* ptr) const
 {
     auto it = pageMap_.find(pageId(ptr));
     if (it == pageMap_.end())
@@ -65,7 +68,7 @@ Span* PageCache::findSpan(void* ptr)
 {
     if (!ptr)
         return nullptr;
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(pageMapMutex_);
     return findSpanLocked(ptr);
 }
 
@@ -171,6 +174,8 @@ void PageCache::deallocateSpan(Span* span)
     span->sizeClass = 0;
     span->isLarge = false;
     span->next = nullptr;
+    span->debugAllocMap.clear();
+    span->debugLargeAllocated = false;
 
     if (returnDirect)
     {
