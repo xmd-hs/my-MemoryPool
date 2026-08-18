@@ -2,6 +2,8 @@
 #include "Common.h"
 #include <map>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 namespace Kama_memoryPool
 {
@@ -25,10 +27,11 @@ public:
 
 private:
     PageCache() = default;
+    ~PageCache();
 
-    // 向系统申请内存
-    void* systemAlloc(size_t numPages); 
-private:
+    PageCache(const PageCache&) = delete;
+    PageCache& operator=(const PageCache&) = delete;
+
     struct Span
     {
         void*  pageAddr; // 页起始地址
@@ -36,11 +39,17 @@ private:
         Span*  next;     // 链表指针
     };
 
+    // 向系统申请内存
+    void* systemAlloc(size_t numPages);
+    bool removeFromFreeList(Span* span);
+
     // 按页数管理空闲span，不同页数对应不同Span链表
     std::map<size_t, Span*> freeSpans_;
     // 页号到span的映射，用于回收
     std::map<void*, Span*> spanMap_;
+    // 记录向操作系统申请的原始映射，析构时整块归还
+    std::vector<std::pair<void*, size_t>> systemAllocs_;
     std::mutex mutex_;
 };
 
-} // namespace memoryPool
+} // namespace Kama_memoryPool

@@ -1,46 +1,70 @@
 #pragma once
 #include "Common.h"
+#include "Platform.h"
+
+#include <cstdint>
 #include <map>
 #include <mutex>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Kama_memoryPool
 {
 
+struct Span
+{
+    void*  pageAddr = nullptr;
+    size_t numPages = 0;
+    void*  originAddr = nullptr;
+    size_t originPages = 0;
+
+    size_t blockSize = 0;
+    size_t blockCount = 0;
+    size_t freeCount = 0;
+    size_t sizeClass = 0;
+    void*  freeList = nullptr;
+
+    Span* next = nullptr;
+    bool  inFreeList = false;
+    bool  isLarge = false;
+};
+
 class PageCache
 {
 public:
-    static const size_t PAGE_SIZE = 4096; // 4K页大小
-
     static PageCache& getInstance()
     {
         static PageCache instance;
         return instance;
     }
 
-    // 分配指定页数的span
-    void* allocateSpan(size_t numPages);
+    static size_t pageSize() { return systemPageSize(); }
 
-    // 释放span
-    void deallocateSpan(void* ptr, size_t numPages);
+    Span* allocateSpan(size_t numPages);
+    void  deallocateSpan(Span* span);
+    Span* findSpan(void* ptr);
 
 private:
     PageCache() = default;
+    ~PageCache();
 
-    // 向系统申请内存
-    void* systemAlloc(size_t numPages);
-private:
-    struct Span
-    {
-        void*  pageAddr; // 页起始地址
-        size_t numPages; // 页数
-        Span*  next;     // 链表指针
-    };
+    PageCache(const PageCache&) = delete;
+    PageCache& operator=(const PageCache&) = delete;
 
-    // 按页数管理空闲span，不同页数对应不同Span链表
+    void* systemAlloc(size_t& numPages);
+    bool  removeFromFreeList(Span* span);
+    void  registerPages(Span* span);
+    void  unregisterPages(Span* span);
+    void  redirectPages(Span* from, Span* to);
+    void  releaseOrigin(Span* span);
+    Span* findSpanLocked(void* ptr);
+    uintptr_t pageId(void* ptr) const;
+
     std::map<size_t, Span*> freeSpans_;
-    // 页号到span的映射，用于回收
-    std::map<void*, Span*> spanMap_;
+    std::unordered_map<uintptr_t, Span*> pageMap_;
+    std::vector<std::pair<void*, size_t>> systemAllocs_;
     std::mutex mutex_;
 };
 
-} // namespace memoryPool
+} // namespace Kama_memoryPool

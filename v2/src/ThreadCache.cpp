@@ -1,8 +1,30 @@
 #include "../include/ThreadCache.h"
 #include "../include/CentralCache.h"
+#include <algorithm>
+#include <cstdlib>
 
 namespace Kama_memoryPool
 {
+
+ThreadCache::ThreadCache()
+{
+    freeList_.fill(nullptr);
+    freeListSize_.fill(0);
+}
+
+ThreadCache::~ThreadCache()
+{
+    for (size_t i = 0; i < FREE_LIST_SIZE; ++i)
+    {
+        if (freeList_[i] && freeListSize_[i] > 0)
+        {
+            size_t bytes = freeListSize_[i] * SizeClass::getSize(i);
+            CentralCache::getInstance().returnRange(freeList_[i], bytes, i);
+            freeList_[i] = nullptr;
+            freeListSize_[i] = 0;
+        }
+    }
+}
 
 void* ThreadCache::allocate(size_t size)
 {
@@ -15,19 +37,17 @@ void* ThreadCache::allocate(size_t size)
     if (size > MAX_BYTES)
     {
         // 大对象直接从系统分配
-        return malloc(size);
+        return std::malloc(size);
     }
 
     size_t index = SizeClass::getIndex(size);
-    
-    // 更新对应自由链表的长度计数
-    freeListSize_[index]--;
     
     // 检查线程本地自由链表
     // 如果 freeList_[index] 不为空，表示该链表中有可用内存块
     if (void* ptr = freeList_[index])
     {
-        freeList_[index] = *reinterpret_cast<void**>(ptr); // 将freeList_[index]指向的内存块的下一个内存块地址（取决于内存块的实现）
+        freeListSize_[index]--;
+        freeList_[index] = *reinterpret_cast<void**>(ptr);
         return ptr;
     }
     
@@ -39,7 +59,7 @@ void ThreadCache::deallocate(void* ptr, size_t size)
 {
     if (size > MAX_BYTES)
     {
-        free(ptr);
+        std::free(ptr);
         return;
     }
 
@@ -62,9 +82,9 @@ void ThreadCache::deallocate(void* ptr, size_t size)
 // 判断是否需要将内存回收给中心缓存
 bool ThreadCache::shouldReturnToCentralCache(size_t index)
 {
-    // 设定阈值，例如：当自由链表的大小超过一定数量时
-    size_t threshold = 256; 
-    return (freeListSize_[index] > threshold);
+    const size_t blockSize = SizeClass::getSize(index);
+    const size_t threshold = std::max(size_t(8), size_t(32 * 1024) / blockSize);
+    return freeListSize_[index] > std::min(threshold, size_t(256));
 }
 
 void* ThreadCache::fetchFromCentralCache(size_t index)
@@ -75,21 +95,16 @@ void* ThreadCache::fetchFromCentralCache(size_t index)
 
     // 取一个返回，其余放入自由链表
     void* result = start;
-    freeList_[index] = *reinterpret_cast<void**>(start);
-    
-    // 更新自由链表大小
-    size_t batchNum = 0;
-    void* current = start; // 从start开始遍历
+    void* next = *reinterpret_cast<void**>(start);
+    freeList_[index] = next;
 
-    // 计算从中心缓存获取的内存块数量
-    while (current != nullptr)
+    size_t remain = 0;
+    for (void* current = next; current != nullptr;
+         current = *reinterpret_cast<void**>(current))
     {
-        batchNum++;
-        current = *reinterpret_cast<void**>(current); // 遍历下一个内存块
+        ++remain;
     }
-
-    // 更新freeListSize_，增加获取的内存块数量
-    freeListSize_[index] += batchNum;
+    freeListSize_[index] += remain;
     
     return result;
 }

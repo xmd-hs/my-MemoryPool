@@ -7,8 +7,8 @@ MemoryPool::MemoryPool(size_t BlockSize)
     , SlotSize_ (0)
     , firstBlock_ (nullptr)
     , curSlot_ (nullptr)
-    , freeList_ (nullptr)
     , lastSlot_ (nullptr)
+    , freeList_ (TaggedPtr{nullptr, 0})
 {}
 
 MemoryPool::~MemoryPool()
@@ -31,8 +31,8 @@ void MemoryPool::init(size_t size)
     SlotSize_ = size;
     firstBlock_ = nullptr;
     curSlot_ = nullptr;
-    freeList_ = nullptr;
     lastSlot_ = nullptr;
+    freeList_.store(TaggedPtr{nullptr, 0}, std::memory_order_relaxed);
 }
 
 void* MemoryPool::allocate()
@@ -93,55 +93,31 @@ size_t MemoryPool::padPointer(char* p, size_t align)
 // 实现无锁入队操作
 bool MemoryPool::pushFreeList(Slot* slot)
 {
-    while (true)
+    TaggedPtr oldHead = freeList_.load(std::memory_order_relaxed);
+    TaggedPtr newHead;
+    do
     {
-        // 获取当前头节点
-        Slot* oldHead = freeList_.load(std::memory_order_relaxed);
-        // 将新节点的 next 指向当前头节点
-        slot->next.store(oldHead, std::memory_order_relaxed);
-
-        // 尝试将新节点设置为头节点
-        if (freeList_.compare_exchange_weak(oldHead, slot,
-         std::memory_order_release, std::memory_order_relaxed))
-        {
-            return true;
-        }
-        // 失败：说明另一个线程可能已经修改了 freeList_
-        // CAS 失败则重试
-    }
+        slot->next.store(oldHead.ptr, std::memory_order_relaxed);
+        newHead.ptr = slot;
+        newHead.tag = oldHead.tag + 1;
+    } while (!freeList_.compare_exchange_weak(oldHead, newHead,
+             std::memory_order_release, std::memory_order_relaxed));
+    return true;
 }
 
-// 实现无锁出队操作
 Slot* MemoryPool::popFreeList()
 {
-    while (true)
+    TaggedPtr oldHead = freeList_.load(std::memory_order_acquire);
+    TaggedPtr newHead;
+    do
     {
-        Slot* oldHead = freeList_.load(std::memory_order_acquire);
-        if (oldHead == nullptr)
-            return nullptr; // 队列为空
-
-        // 在访问 newHead 之前再次验证 oldHead 的有效性
-        Slot* newHead = nullptr;
-        try
-        {
-            newHead = oldHead->next.load(std::memory_order_relaxed);
-        }
-        catch(...)
-        {
-            // 如果返回失败，则continue重新尝试申请内存
-            continue;
-        }
-        
-        // 尝试更新头结点
-        // 原子性地尝试将 freeList_ 从 oldHead 更新为 newHead
-        if (freeList_.compare_exchange_weak(oldHead, newHead,
-         std::memory_order_acquire, std::memory_order_relaxed))
-        {
-            return oldHead;
-        }
-        // 失败：说明另一个线程可能已经修改了 freeList_
-        // CAS 失败则重试
-    }
+        if (oldHead.ptr == nullptr)
+            return nullptr;
+        newHead.ptr = oldHead.ptr->next.load(std::memory_order_relaxed);
+        newHead.tag = oldHead.tag + 1;
+    } while (!freeList_.compare_exchange_weak(oldHead, newHead,
+             std::memory_order_acquire, std::memory_order_relaxed));
+    return oldHead.ptr;
 }
 
 

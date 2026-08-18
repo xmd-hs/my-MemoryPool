@@ -3,6 +3,7 @@
 #include <cassert>
 #include <thread>
 #include <chrono>
+#include <memory>
 
 namespace Kama_memoryPool
 {
@@ -31,7 +32,6 @@ CentralCache::CentralCache()
     {
         time = std::chrono::steady_clock::now();
     }
-    spanCount_.store(0, std::memory_order_relaxed);
 }
 
 void* CentralCache::fetchRange(size_t index)
@@ -55,7 +55,7 @@ void* CentralCache::fetchRange(size_t index)
         if (!result)
         {
             // 如果中心缓存为空，从页缓存获取新的内存块
-            size_t size = (index + 1) * ALIGNMENT;
+            size_t size = SizeClass::getSize(index);
             result = fetchFromPageCache(size);
 
             if (!result)
@@ -97,13 +97,14 @@ void* CentralCache::fetchRange(size_t index)
                 // 做记录是为了将中心缓存多余内存块归还给页缓存做准备。考虑点：
                 // 1.CentralCache 管理的是小块内存，这些内存可能不连续
                 // 2.PageCache 的 deallocateSpan 要求归还连续的内存
-                size_t trackerIndex = spanCount_++;
-                if (trackerIndex < spanTrackers_.size())
+                auto tracker = std::make_unique<SpanTracker>();
+                tracker->spanAddr.store(start, std::memory_order_release);
+                tracker->numPages.store(numPages, std::memory_order_release);
+                tracker->blockCount.store(blockNum, std::memory_order_release);
+                tracker->freeCount.store(blockNum - 1, std::memory_order_release);
                 {
-                    spanTrackers_[trackerIndex].spanAddr.store(start, std::memory_order_release);
-                    spanTrackers_[trackerIndex].numPages.store(numPages, std::memory_order_release);
-                    spanTrackers_[trackerIndex].blockCount.store(blockNum, std::memory_order_release); // 共分配了blockNum个内存块
-                    spanTrackers_[trackerIndex].freeCount.store(blockNum - 1, std::memory_order_release); // 第一个块result已被分配出去，所以初始空闲块数为blockNum - 1
+                    std::lock_guard<std::mutex> lock(trackerMutex_);
+                    spanTrackers_.push_back(std::move(tracker));
                 }
             }
         } 
@@ -142,7 +143,7 @@ void CentralCache::returnRange(void* start, size_t size, size_t index)
     if (!start || index >= FREE_LIST_SIZE) 
         return;
 
-    size_t blockSize = (index + 1) * ALIGNMENT;
+    size_t blockSize = SizeClass::getSize(index);
     size_t blockCount = size / blockSize;    
 
     while (locks_[index].test_and_set(std::memory_order_acquire)) 
@@ -290,16 +291,16 @@ void* CentralCache::fetchFromPageCache(size_t size)
 
 SpanTracker* CentralCache::getSpanTracker(void* blockAddr)
 {
-    // 遍历spanTrackers_数组，找到blockAddr所属的span
-    for (size_t i = 0; i < spanCount_.load(std::memory_order_relaxed); ++i)
+    std::lock_guard<std::mutex> lock(trackerMutex_);
+    for (auto& tracker : spanTrackers_)
     {
-        void* spanAddr = spanTrackers_[i].spanAddr.load(std::memory_order_relaxed);
-        size_t numPages = spanTrackers_[i].numPages.load(std::memory_order_relaxed);
+        void* spanAddr = tracker->spanAddr.load(std::memory_order_relaxed);
+        size_t numPages = tracker->numPages.load(std::memory_order_relaxed);
         
         if (blockAddr >= spanAddr && 
             blockAddr < static_cast<char*>(spanAddr) + numPages * PageCache::PAGE_SIZE)
         {
-            return &spanTrackers_[i];
+            return tracker.get();
         }
     }
     return nullptr;

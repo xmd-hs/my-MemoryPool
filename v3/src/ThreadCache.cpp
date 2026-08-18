@@ -1,166 +1,183 @@
-#include "../include/ThreadCache.h"
-#include "../include/CentralCache.h"
+#include "ThreadCache.h"
+#include "CentralCache.h"
+#include "PageCache.h"
+
+#include <algorithm>
 
 namespace Kama_memoryPool
 {
 
+ThreadCache::ThreadCache()
+{
+    freeList_.fill(nullptr);
+    freeListSize_.fill(0);
+}
+
+ThreadCache::~ThreadCache()
+{
+    flushAll();
+}
+
+void ThreadCache::flushAll()
+{
+    for (size_t i = 0; i < FREE_LIST_SIZE; ++i)
+    {
+        if (freeList_[i] && freeListSize_[i] > 0)
+        {
+            CentralCache::getInstance().returnRange(freeList_[i], freeListSize_[i], i);
+            freeList_[i] = nullptr;
+            freeListSize_[i] = 0;
+        }
+    }
+}
+
+size_t ThreadCache::maxCachedBlocks(size_t size) const
+{
+    constexpr size_t kMaxBytes = 32 * 1024;
+    size_t n = std::max(size_t(1), kMaxBytes / std::max(size, ALIGNMENT));
+    return std::min(n, size_t(256));
+}
+
+bool ThreadCache::shouldReturnToCentralCache(size_t index) const
+{
+    return freeListSize_[index] > maxCachedBlocks(SizeClass::getSize(index));
+}
+
+size_t ThreadCache::getBatchNum(size_t size) const
+{
+    constexpr size_t kMaxBatchBytes = 8 * 1024;
+    size_t n = std::max(size_t(1), kMaxBatchBytes / std::max(size, ALIGNMENT));
+    if (size <= 32) n = std::min(n, size_t(64));
+    else if (size <= 64) n = std::min(n, size_t(32));
+    else if (size <= 256) n = std::min(n, size_t(16));
+    else if (size <= 1024) n = std::min(n, size_t(8));
+    else n = std::min(n, size_t(4));
+    return std::max(size_t(1), n);
+}
+
 void* ThreadCache::allocate(size_t size)
 {
-    // 处理0大小的分配请求
     if (size == 0)
-    {
-        size = ALIGNMENT; // 至少分配一个对齐大小
-    }
-    
+        size = ALIGNMENT;
+
     if (size > MAX_BYTES)
     {
-        // 大对象直接从系统分配
-        return malloc(size);
+        const size_t ps = PageCache::pageSize();
+        size_t numPages = (size + ps - 1) / ps;
+        Span* span = PageCache::getInstance().allocateSpan(numPages);
+        if (!span)
+            return nullptr;
+        span->isLarge = true;
+        span->blockSize = size;
+        span->blockCount = 1;
+        span->freeCount = 0;
+        span->sizeClass = static_cast<size_t>(-1);
+        return span->pageAddr;
     }
 
-    size_t index = SizeClass::getIndex(size);
-
-    // 更新自由链表大小
-    freeListSize_[index]--;
-
-    // 检查线程本地自由链表
-    // 如果 freeList_[index] 不为空，表示该链表中有可用内存块
+    const size_t index = SizeClass::getIndex(size);
     if (void* ptr = freeList_[index])
     {
-        freeList_[index] = *reinterpret_cast<void**>(ptr); // 将freeList_[index]指向的内存块的下一个内存块地址（取决于内存块的实现）
+        freeListSize_[index]--;
+        freeList_[index] = *reinterpret_cast<void**>(ptr);
         return ptr;
     }
 
-    // 如果线程本地自由链表为空，则从中心缓存获取一批内存
     return fetchFromCentralCache(index);
 }
 
-void ThreadCache::deallocate(void* ptr, size_t size)
+void* ThreadCache::allocateAligned(size_t size, size_t alignment)
 {
-    if (size > MAX_BYTES)
+    if (alignment <= ALIGNMENT)
+        return allocate(size);
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
+        alignment = ALIGNMENT;
+
+    size_t need = (size + alignment - 1) & ~(alignment - 1);
+    return allocate(need);
+}
+
+void ThreadCache::deallocate(void* ptr)
+{
+    if (!ptr)
+        return;
+
+    Span* span = PageCache::getInstance().findSpan(ptr);
+    if (!span)
+        return;
+
+    if (span->isLarge)
     {
-        free(ptr);
+        PageCache::getInstance().deallocateSpan(span);
         return;
     }
 
-    size_t index = SizeClass::getIndex(size);
+    const size_t index = span->sizeClass;
+    if (index >= FREE_LIST_SIZE)
+        return;
 
-    // 插入到线程本地自由链表
     *reinterpret_cast<void**>(ptr) = freeList_[index];
     freeList_[index] = ptr;
+    freeListSize_[index]++;
 
-     // 更新自由链表大小
-    freeListSize_[index]++; // 增加对应大小类的自由链表大小
-
-    // 判断是否需要将部分内存回收给中心缓存
     if (shouldReturnToCentralCache(index))
-    {
-        returnToCentralCache(freeList_[index], size);
-    }
+        returnToCentralCache(index);
 }
 
-// 判断是否需要将内存回收给中心缓存
-bool ThreadCache::shouldReturnToCentralCache(size_t index)
+void ThreadCache::deallocate(void* ptr, size_t /*size*/)
 {
-    // 设定阈值，例如：当自由链表的大小超过一定数量时
-    size_t threshold = 64; // 例如，64个内存块
-    return (freeListSize_[index] > threshold);
+    deallocate(ptr);
 }
 
 void* ThreadCache::fetchFromCentralCache(size_t index)
 {
-    size_t size = (index + 1) * ALIGNMENT;
-    // 根据对象内存大小计算批量获取的数量
-    size_t batchNum = getBatchNum(size);
-    // 从中心缓存批量获取内存
+    const size_t size = SizeClass::getSize(index);
+    const size_t batchNum = getBatchNum(size);
     void* start = CentralCache::getInstance().fetchRange(index, batchNum);
-    if (!start) return nullptr;
+    if (!start)
+        return nullptr;
 
-    // 更新自由链表大小
-    freeListSize_[index] += batchNum; // 增加对应大小类的自由链表大小
-
-    // 取一个返回，其余放入线程本地自由链表
     void* result = start;
-    if (batchNum > 1)
+    void* next = *reinterpret_cast<void**>(start);
+    freeList_[index] = next;
+
+    size_t remain = 0;
+    for (void* current = next; current != nullptr;
+         current = *reinterpret_cast<void**>(current))
     {
-        freeList_[index] = *reinterpret_cast<void**>(start);
+        ++remain;
     }
-    
+    freeListSize_[index] += remain;
     return result;
 }
 
-void ThreadCache::returnToCentralCache(void* start, size_t size)
+void ThreadCache::returnToCentralCache(size_t index)
 {
-    // 根据大小计算对应的索引
-    size_t index = SizeClass::getIndex(size);
-
-    // 获取对齐后的实际块大小
-    size_t alignedSize = SizeClass::roundUp(size);
-
-    // 计算要归还内存块数量
     size_t batchNum = freeListSize_[index];
-    if (batchNum <= 1) return; // 如果只有一个块，则不归还
+    if (batchNum <= 1)
+        return;
 
-    // 保留一部分在ThreadCache中（比如保留1/4）
     size_t keepNum = std::max(batchNum / 4, size_t(1));
-    size_t returnNum = batchNum - keepNum;
+    keepNum = std::min(keepNum, maxCachedBlocks(SizeClass::getSize(index)));
+    if (keepNum >= batchNum)
+        return;
 
-    // 将内存块串成链表
-    char* current = static_cast<char*>(start);
-    // 使用对齐后的大小计算分割点
-    char* splitNode = current;
-    for (size_t i = 0; i < keepNum - 1; ++i) 
+    void* splitNode = freeList_[index];
+    for (size_t i = 0; i < keepNum - 1; ++i)
     {
-        splitNode = reinterpret_cast<char*>(*reinterpret_cast<void**>(splitNode));
-        if (splitNode == nullptr) 
-        {
-            // 如果链表提前结束，更新实际的返回数量
-            returnNum = batchNum - (i + 1);
-            break;
-        }
+        if (!splitNode)
+            return;
+        splitNode = *reinterpret_cast<void**>(splitNode);
     }
+    if (!splitNode)
+        return;
 
-    if (splitNode != nullptr) 
-    {
-        // 将要返回的部分和要保留的部分断开
-        void* nextNode = *reinterpret_cast<void**>(splitNode);
-        *reinterpret_cast<void**>(splitNode) = nullptr; // 断开连接
+    void* nextNode = *reinterpret_cast<void**>(splitNode);
+    *reinterpret_cast<void**>(splitNode) = nullptr;
+    freeListSize_[index] = keepNum;
 
-        // 更新ThreadCache的空闲链表
-        freeList_[index] = start;
-
-        // 更新自由链表大小
-        freeListSize_[index] = keepNum;
-
-        // 将剩余部分返回给CentralCache
-        if (returnNum > 0 && nextNode != nullptr)
-        {
-            CentralCache::getInstance().returnRange(nextNode, returnNum * alignedSize, index);
-        }
-    }
+    if (nextNode)
+        CentralCache::getInstance().returnRange(nextNode, batchNum - keepNum, index);
 }
 
-// 计算批量获取内存块的数量
-size_t ThreadCache::getBatchNum(size_t size)
-{
-    // 基准：每次批量获取不超过4KB内存
-    constexpr size_t MAX_BATCH_SIZE = 4 * 1024; // 4KB
-
-    // 根据对象大小设置合理的基准批量数
-    size_t baseNum;
-    if (size <= 32) baseNum = 64;    // 64 * 32 = 2KB
-    else if (size <= 64) baseNum = 32;  // 32 * 64 = 2KB
-    else if (size <= 128) baseNum = 16; // 16 * 128 = 2KB
-    else if (size <= 256) baseNum = 8;  // 8 * 256 = 2KB
-    else if (size <= 512) baseNum = 4;  // 4 * 512 = 2KB
-    else if (size <= 1024) baseNum = 2; // 2 * 1024 = 2KB
-    else baseNum = 1;                   // 大于1024的对象每次只从中心缓存取1个
-
-    // 计算最大批量数
-    size_t maxNum = std::max(size_t(1), MAX_BATCH_SIZE / size);
-
-    // 取最小值，但确保至少返回1
-    return std::max(sizeof(1), std::min(maxNum, baseNum));
-}
-
-} // namespace memoryPool
+} // namespace Kama_memoryPool

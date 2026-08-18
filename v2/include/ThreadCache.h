@@ -17,12 +17,8 @@ public:
     void* allocate(size_t size);
     void deallocate(void* ptr, size_t size);
 private:
-    ThreadCache() 
-    {
-        // 初始化自由链表和大小统计
-        freeList_.fill(nullptr);
-        freeListSize_.fill(0);
-    }
+    ThreadCache();
+    ~ThreadCache();
     
     // 从中心缓存获取内存
     void* fetchFromCentralCache(size_t index);

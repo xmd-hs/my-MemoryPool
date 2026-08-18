@@ -3,7 +3,7 @@
 #include <vector>
 #include <thread>
 #include <cassert>
-#include <cstring>
+#include <cstdint>
 #include <random>
 #include <algorithm>
 #include <atomic>

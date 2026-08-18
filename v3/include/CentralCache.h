@@ -1,9 +1,18 @@
 #pragma once
 #include "Common.h"
-#include <mutex>
+#include "PageCache.h"
+
+#include <array>
+#include <atomic>
 
 namespace Kama_memoryPool
 {
+
+struct CacheShard
+{
+    alignas(64) std::atomic_flag lock;
+    Span* partial;
+};
 
 class CentralCache
 {
@@ -15,31 +24,17 @@ public:
     }
 
     void* fetchRange(size_t index, size_t batchNum);
-    void returnRange(void* start, size_t size, size_t bytes);
+    void returnRange(void* start, size_t blockCount, size_t index);
 
 private:
-    // 相互是还所有原子指针为nullptr
-    CentralCache()
-    {
-        for (auto& ptr : centralFreeList_)
-        {
-            ptr.store(nullptr, std::memory_order_relaxed);
-        }
-        // 初始化所有锁
-        for (auto& lock : locks_)
-        {
-            lock.clear();
-        }
-    }
-    // 从页缓存获取内存
-    void* fetchFromPageCache(size_t size);
+    CentralCache();
+    CentralCache(const CentralCache&) = delete;
+    CentralCache& operator=(const CentralCache&) = delete;
 
-private:
-    // 中心缓存的自由链表
-    std::array<std::atomic<void*>, FREE_LIST_SIZE> centralFreeList_;
+    Span* createSpan(size_t index);
+    void unlinkPartial(size_t index, Span* span);
 
-    // 用于同步的自旋锁
-    std::array<std::atomic_flag, FREE_LIST_SIZE> locks_;
+    std::array<CacheShard, FREE_LIST_SIZE> shards_{};
 };
 
-} // namespace memoryPool
+} // namespace Kama_memoryPool

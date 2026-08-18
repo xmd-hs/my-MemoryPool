@@ -3,7 +3,7 @@
 #include <vector>
 #include <thread>
 #include <cassert>
-#include <cstring>
+#include <cstdint>
 #include <random>
 #include <algorithm>
 #include <atomic>
@@ -182,6 +182,86 @@ void testStress()
     std::cout << "Stress test passed!" << std::endl;
 }
 
+void testSizeClasses()
+{
+    std::cout << "Running size class test..." << std::endl;
+    assert(SizeClass::classCount() > 0);
+    assert(SizeClass::getSize(0) == ALIGNMENT);
+    assert(SizeClass::getSize(SizeClass::classCount() - 1) == MAX_BYTES);
+
+    for (size_t n = 1; n <= 4096; ++n)
+    {
+        size_t rounded = SizeClass::roundUp(n);
+        assert(rounded >= n);
+        assert(rounded == SizeClass::getSize(SizeClass::getIndex(n)));
+    }
+
+    std::cout << "Size class test passed!" << std::endl;
+}
+
+void testUnsizedDeallocate()
+{
+    std::cout << "Running unsized deallocate test..." << std::endl;
+
+    void* p1 = MemoryPool::allocate(32);
+    assert(p1 != nullptr);
+    MemoryPool::deallocate(p1);
+
+    void* p2 = MemoryPool::allocate(1024 * 1024);
+    assert(p2 != nullptr);
+    MemoryPool::deallocate(p2);
+
+    std::cout << "Unsized deallocate test passed!" << std::endl;
+}
+
+void testAlignedAndTyped()
+{
+    std::cout << "Running aligned / typed allocation test..." << std::endl;
+
+    void* p = MemoryPool::allocateAligned(24, 16);
+    assert(p != nullptr);
+    assert((reinterpret_cast<uintptr_t>(p) & 15) == 0);
+    MemoryPool::deallocate(p);
+
+    struct alignas(16) Vec4 { float v[4]; };
+    Vec4* v = newElement<Vec4>();
+    assert(v != nullptr);
+    assert((reinterpret_cast<uintptr_t>(v) & 15) == 0);
+    v->v[0] = 1.0f;
+    deleteElement(v);
+
+    std::cout << "Aligned / typed allocation test passed!" << std::endl;
+}
+
+void testThreadExitReturnsMemory()
+{
+    std::cout << "Running thread-exit return test..." << std::endl;
+
+    auto worker = []() {
+        for (int i = 0; i < 256; ++i)
+        {
+            void* p = MemoryPool::allocate(64);
+            assert(p != nullptr);
+            MemoryPool::deallocate(p);
+        }
+        // 离开作用域时 ThreadCache 析构，应把残留块还给 CentralCache
+        for (int i = 0; i < 32; ++i)
+            (void)MemoryPool::allocate(128);
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i)
+        threads.emplace_back(worker);
+    for (auto& t : threads)
+        t.join();
+
+    void* p = MemoryPool::allocate(128);
+    assert(p != nullptr);
+    MemoryPool::deallocate(p);
+
+    std::cout << "Thread-exit return test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
@@ -193,6 +273,10 @@ int main()
         testMultiThreading();
         testEdgeCases();
         testStress();
+        testSizeClasses();
+        testUnsizedDeallocate();
+        testAlignedAndTyped();
+        testThreadExitReturnsMemory();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;

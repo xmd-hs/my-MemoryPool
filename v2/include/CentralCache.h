@@ -1,7 +1,8 @@
 #pragma once
 #include "Common.h"
 #include <mutex>
-#include <unordered_map>
+#include <memory>
+#include <vector>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -48,9 +49,9 @@ private:
     // 用于同步的自旋锁
     std::array<std::atomic_flag, FREE_LIST_SIZE> locks_;
     
-    // 使用数组存储span信息，避免map的开销
-    std::array<SpanTracker, 1024> spanTrackers_;
-    std::atomic<size_t> spanCount_{0};
+    // 使用动态数组存储span信息，避免固定 1024 上限
+    std::mutex trackerMutex_;
+    std::vector<std::unique_ptr<SpanTracker>> spanTrackers_;
 
     // 延迟归还相关的成员变量
     static const size_t MAX_DELAY_COUNT = 48;  // 最大延迟计数
