@@ -34,69 +34,176 @@
 
 ![v2/v3 架构](images/v2.png)
 
-v3 对外接口：
+## v3 SDK 怎么用
 
-```cpp
-void* MemoryPool::allocate(size_t size);
-void* MemoryPool::allocateAligned(size_t size, size_t alignment);
-void  MemoryPool::deallocate(void* ptr);              // 不需要带 size
-void  MemoryPool::deallocate(void* ptr, size_t size); // 兼容旧调用
-T*    newElement<T>(args...);
-void  deleteElement<T>(T*);
-MemoryPoolStats MemoryPool::stats();
-```
+v3 提供可安装的静态库（也可编动态库）。接入方只依赖公共头文件，不必把实现源码编进自己的工程。
 
-## 编译
+安装后的头文件：
 
-Linux / macOS / Windows 均可。先进入 `v1`、`v2` 或 `v3`：
+| 头文件 | 用途 |
+|--------|------|
+| `<kama/MemoryPool.h>` | C++ 主接口：`allocate` / `deallocate` / `newElement` |
+| `<kama/Allocator.h>` | STL 分配器，给 `std::vector` 等容器用 |
+| `<kama/kama_memory_pool.h>` | C API，方便其它语言绑定 |
+
+### 1. 编译并安装
 
 ```bash
 cd v3
 mkdir build && cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=../install ..
 cmake --build .
+cmake --install .
 ```
 
-Windows 示例：
+常用选项：
 
 ```bash
-cmake -G "Visual Studio 17 2022" -A x64 ..
+cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DKAMA_MEMORY_POOL_BUILD_SHARED=OFF \
+      -DKAMA_MEMORY_POOL_BUILD_TESTS=ON \
+      -DKAMA_MEMORY_POOL_BUILD_EXAMPLES=ON \
+      ..
+```
+
+编动态库：
+
+```bash
+cmake -DKAMA_MEMORY_POOL_BUILD_SHARED=ON -DCMAKE_INSTALL_PREFIX=../install ..
+```
+
+Windows（Visual Studio）：
+
+```bash
+cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX=../install ..
 cmake --build . --config Release
+cmake --install . --config Release
 ```
 
-无 CMake 时也可直接用编译器（需 C++17；v1 为 C++11）：
-
-```bash
-clang++ -std=c++17 -O2 -pthread -Iinclude src/*.cpp tests/UnitTest.cpp -o unit_test
-```
-
-清理：
-
-```bash
-cmake --build . --target clean
-```
-
-## 运行
-
-Linux / macOS：
-
-```bash
-./unit_test    # v1 可执行文件名以 CMake 工程名为准
-./perf_test
-```
-
-Windows：
+安装目录大致为：
 
 ```text
-unit_test.exe
-perf_test.exe
+include/kama/MemoryPool.h
+include/kama/Allocator.h
+include/kama/kama_memory_pool.h
+lib/libkama_memory_pool.a          # Windows: kama_memory_pool.lib
+lib/cmake/KamaMemoryPool/...
 ```
 
-v2 / v3 也可用：
+本仓库自测：
 
 ```bash
-cmake --build . --target test
-cmake --build . --target perf
+cmake --build . --target test    # 单元测试
+cmake --build . --target perf    # 性能对照
+./kama_example                   # SDK 最小示例
+```
+
+无 CMake 时也可以直接链静态库源文件（需 C++17）：
+
+```bash
+clang++ -std=c++17 -O2 -pthread \
+  -Iinclude -Isrc \
+  src/*.cpp your_app.cpp \
+  -o your_app
+```
+
+### 2. 在你的 CMake 工程里接入
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(my_app LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(KamaMemoryPool REQUIRED)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE KamaMemoryPool::memory_pool)
+```
+
+如果库装在自定义前缀，配置时带上：
+
+```bash
+cmake -DKamaMemoryPool_DIR=/path/to/v3/install/lib/cmake/KamaMemoryPool ..
+```
+
+或：
+
+```bash
+cmake -DCMAKE_PREFIX_PATH=/path/to/v3/install ..
+```
+
+### 3. C++ 用法
+
+```cpp
+#include <kama/MemoryPool.h>
+
+using Kama_memoryPool::MemoryPool;
+
+void demo()
+{
+    void* p = MemoryPool::allocate(64);
+    // 使用 p ...
+    MemoryPool::deallocate(p);          // 不必带 size
+
+    // 旧接口仍然可用
+    void* q = MemoryPool::allocate(128);
+    MemoryPool::deallocate(q, 128);
+
+    int* n = MemoryPool::newElement<int>(42);
+    MemoryPool::deleteElement(n);
+
+    auto st = MemoryPool::stats();      // allocCount / freeCount / liveAllocs
+    (void)st;
+}
+```
+
+超过 16 字节对齐的类型会走 `allocateAligned`：
+
+```cpp
+struct alignas(32) Block { char data[32]; };
+Block* b = Kama_memoryPool::newElement<Block>();
+Kama_memoryPool::deleteElement(b);
+```
+
+### 4. STL 容器
+
+```cpp
+#include <kama/Allocator.h>
+#include <vector>
+#include <string>
+
+std::vector<int, Kama_memoryPool::Allocator<int>> nums;
+nums.push_back(1);
+```
+
+### 5. C 用法
+
+```c
+#include <kama/kama_memory_pool.h>
+
+void* p = kama_alloc(64);
+kama_free(p);
+
+void* q = kama_alloc_aligned(64, 16);
+kama_free_sized(q, 64);
+```
+
+### 6. 使用注意
+
+- 用池分配的指针必须用池释放，不要和 `malloc` / `free`、`new` / `delete` 混用。
+- `deallocate(ptr)` 通过页映射识别块大小，跨线程释放是安全的。
+- 小对象上限是 256KB（`kMaxBytes`）；更大的请求按页向操作系统申请，释放时整段归还。
+- 默认最小对齐 8 字节（`kAlignment`）。
+- 当前版本号：`1.0.0`（`KAMA_MEMORY_POOL_VERSION`）。
+
+## 编译 v1 / v2（教学对照）
+
+v1、v2 仍是目录内直接编测试程序，不是 SDK：
+
+```bash
+cd v1   # 或 v2
+mkdir build && cd build
+cmake ..
+cmake --build .
 ```
 
 ## 测试结果

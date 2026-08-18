@@ -1,4 +1,4 @@
-#include "../include/MemoryPool.h"
+#include <kama/MemoryPool.h>
 #include <iostream>
 #include <vector>
 #include <chrono>

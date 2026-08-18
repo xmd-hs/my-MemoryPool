@@ -1,4 +1,7 @@
-#include "../include/MemoryPool.h"
+#include <kama/MemoryPool.h>
+#include <kama/Allocator.h>
+#include <kama/kama_memory_pool.h>
+#include "Common.h"
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -262,6 +265,24 @@ void testThreadExitReturnsMemory()
     std::cout << "Thread-exit return test passed!" << std::endl;
 }
 
+void testSdkWrappers()
+{
+    std::cout << "Running SDK wrapper test..." << std::endl;
+
+    void* p = kama_alloc(48);
+    assert(p != nullptr);
+    static_cast<char*>(p)[0] = 1;
+    kama_free(p);
+
+    std::vector<int, Allocator<int>> nums;
+    nums.push_back(1);
+    nums.push_back(2);
+    assert(nums.size() == 2);
+    assert(nums[0] == 1);
+
+    std::cout << "SDK wrapper test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
@@ -277,6 +298,7 @@ int main()
         testUnsizedDeallocate();
         testAlignedAndTyped();
         testThreadExitReturnsMemory();
+        testSdkWrappers();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;

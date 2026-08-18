@@ -1,5 +1,7 @@
 #pragma once
 
+#include <kama/MemoryPool.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -14,8 +16,8 @@
 namespace Kama_memoryPool
 {
 
-constexpr size_t ALIGNMENT = 8;
-constexpr size_t MAX_BYTES = 256 * 1024;
+constexpr size_t ALIGNMENT = kAlignment;
+constexpr size_t MAX_BYTES = kMaxBytes;
 constexpr size_t kMaxSizeClasses = 64;
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
