@@ -16,10 +16,6 @@
 - 自由链表：带版本号的 CAS（tagged pointer），避免 ABA
 - 块内bump分配，用互斥锁保护扩块
 
-架构：
-
-![v1 架构](images/v1.jpg)
-
 ### v2 / v3
 
 三层缓存：
@@ -29,10 +25,6 @@
 - **PageCache**：按系统页向 OS 申请（Linux/macOS `mmap`，Windows `VirtualAlloc`），支持前后合并；完整映射可归还 OS
 - **几何 size class**（约 60 档，8B–256KB）：每线程元数据从约 512KB 降到数 KB
 - **页映射**：`deallocate(ptr)` 可不带 size；支持对齐分配、`newElement` / `deleteElement` 和简单统计
-
-架构：
-
-![v2/v3 架构](images/v2.png)
 
 ## v3 SDK 怎么用
 
