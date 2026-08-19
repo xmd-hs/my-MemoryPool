@@ -282,6 +282,11 @@ Apple 平台的系统分配器（libmalloc）本身很快，下列数字用于�
 
 ### v3 性能
 
+Windows / MSVC Release 的最新三路对比（v3、`new/delete`、`malloc/free`）见
+[v3/WINDOWS_BENCHMARK.md](v3/WINDOWS_BENCHMARK.md)。生产性能构建默认关闭全局统计，
+需要调用 `MemoryPool::stats()` 获取计数时请显式设置
+`KAMA_MEMORY_POOL_ENABLE_STATS=ON`。
+
 墙钟时间。`v3/tests/PerformanceTest.cpp` 使用固定 seed、线程局部随机数，每项跑 5 轮取中位数。负载与 v2 不完全相同，不要直接横向对比。
 
 | 场景 | 内存池（中位数） | `new`/`delete`（中位数） |

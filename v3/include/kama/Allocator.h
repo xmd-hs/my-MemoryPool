@@ -37,9 +37,12 @@ public:
         return static_cast<T*>(p);
     }
 
-    void deallocate(T* p, std::size_t) noexcept
+    void deallocate(T* p, std::size_t n) noexcept
     {
-        MemoryPool::deallocate(p);
+        if constexpr (alignof(T) <= kAlignment)
+            MemoryPool::deallocate(p, n * sizeof(T));
+        else
+            MemoryPool::deallocate(p);
     }
 };
 

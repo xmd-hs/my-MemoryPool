@@ -21,7 +21,7 @@ namespace Kama_memoryPool
 #endif
 
 #ifndef KAMA_MEMORY_POOL_STATS_ENABLED
-#define KAMA_MEMORY_POOL_STATS_ENABLED 1
+#define KAMA_MEMORY_POOL_STATS_ENABLED 0
 #endif
 
 constexpr bool kDebugGuardsEnabled = KAMA_MEMORY_POOL_DEBUG_GUARDS != 0;
