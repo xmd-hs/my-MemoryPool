@@ -112,6 +112,25 @@ constexpr std::array<uint8_t, 257> makeSmallIndexMap()
 
 constexpr std::array<uint8_t, 257> kSmallIndexMap = makeSmallIndexMap();
 
+constexpr size_t kIndexMapEntries = MAX_BYTES / ALIGNMENT + 1;
+
+constexpr std::array<uint8_t, kIndexMapEntries> makeIndexMap()
+{
+    std::array<uint8_t, kIndexMapEntries> map{};
+    size_t index = 0;
+    for (size_t unit = 0; unit < kIndexMapEntries; ++unit)
+    {
+        const size_t bytes = unit == 0 ? ALIGNMENT : unit * ALIGNMENT;
+        while (index + 1 < kSizeClassTable.count &&
+               kSizeClassTable.sizes[index] < bytes)
+            ++index;
+        map[unit] = static_cast<uint8_t>(index);
+    }
+    return map;
+}
+
+constexpr std::array<uint8_t, kIndexMapEntries> kIndexMap = makeIndexMap();
+
 static_assert(FREE_LIST_SIZE > 0 && FREE_LIST_SIZE <= kMaxSizeClasses, "invalid size class count");
 static_assert(kSizeClassTable.sizes[0] == ALIGNMENT, "first size class must be ALIGNMENT");
 static_assert(kSizeClassTable.sizes[FREE_LIST_SIZE - 1] == MAX_BYTES, "last size class must cover MAX_BYTES");
@@ -137,19 +156,9 @@ public:
     {
         if (bytes <= 256)
             return kSmallIndexMap[bytes];
-
-        bytes = std::max(bytes, ALIGNMENT);
-        size_t lo = 0;
-        size_t hi = FREE_LIST_SIZE;
-        while (lo < hi)
-        {
-            size_t mid = (lo + hi) / 2;
-            if (kSizeClassTable.sizes[mid] < bytes)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        return lo;
+        if (bytes > MAX_BYTES)
+            return FREE_LIST_SIZE;
+        return kIndexMap[(bytes + ALIGNMENT - 1) / ALIGNMENT];
     }
 };
 

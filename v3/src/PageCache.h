@@ -32,6 +32,7 @@ struct Span
 
     std::vector<std::uint8_t> debugAllocMap;
     bool debugLargeAllocated = false;
+    std::mutex debugMutex;
 };
 
 class PageCache
@@ -48,6 +49,8 @@ public:
     Span* allocateSpan(size_t numPages);
     void  deallocateSpan(Span* span);
     Span* findSpan(void* ptr);
+    size_t reservedBytes();
+    size_t cachedPageBytes();
 
 private:
     PageCache() = default;
@@ -68,6 +71,7 @@ private:
     std::map<size_t, Span*> freeSpans_;
     std::unordered_map<uintptr_t, Span*> pageMap_;
     std::vector<std::pair<void*, size_t>> systemAllocs_;
+    size_t cachedFreePages_ = 0;
     mutable std::shared_mutex pageMapMutex_;
     std::mutex mutex_;
 };

@@ -1,5 +1,6 @@
 #include <kama/MemoryPool.h>
 #include "Common.h"
+#include "PageCache.h"
 #include "ThreadCache.h"
 
 #include <atomic>
@@ -90,6 +91,8 @@ void MemoryPool::deallocate(void* ptr, std::size_t size)
 MemoryPoolStats MemoryPool::stats()
 {
     MemoryPoolStats out;
+    out.reservedBytes = PageCache::getInstance().reservedBytes();
+    out.cachedPageBytes = PageCache::getInstance().cachedPageBytes();
     if constexpr (!kStatsEnabled)
         return out;
     out.allocCount = g_allocCount.load(std::memory_order_relaxed);

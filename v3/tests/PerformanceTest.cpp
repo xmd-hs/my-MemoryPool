@@ -17,6 +17,27 @@ using Clock = std::chrono::steady_clock;
 namespace
 {
 
+enum class Backend { Pool, NewDelete, MallocFree };
+
+void* backendAllocate(Backend backend, size_t size)
+{
+    if (backend == Backend::Pool)
+        return MemoryPool::allocate(size);
+    if (backend == Backend::NewDelete)
+        return static_cast<void*>(new (std::nothrow) char[size]);
+    return std::malloc(size);
+}
+
+void backendFree(Backend backend, void* ptr, size_t size)
+{
+    if (backend == Backend::Pool)
+        MemoryPool::deallocate(ptr, size);
+    else if (backend == Backend::NewDelete)
+        delete[] static_cast<char*>(ptr);
+    else
+        std::free(ptr);
+}
+
 class Timer
 {
 public:
@@ -166,6 +187,119 @@ double runMallocMixedSizes(uint32_t seed)
     for (const auto& item : ptrs)
         std::free(item.first);
     return timer.elapsedMs();
+}
+
+double runScalabilityCase(Backend backend, size_t objectSize, size_t threadCount)
+{
+    constexpr size_t kOperationsPerThread = 25000;
+    constexpr size_t kLiveBatch = 256;
+    Timer timer;
+    std::vector<std::thread> threads;
+    threads.reserve(threadCount);
+    for (size_t tid = 0; tid < threadCount; ++tid)
+    {
+        threads.emplace_back([backend, objectSize,
+                              kLiveBatch, kOperationsPerThread]() {
+            std::vector<void*> live;
+            live.reserve(kLiveBatch);
+            for (size_t i = 0; i < kOperationsPerThread; ++i)
+            {
+                void* ptr = backendAllocate(backend, objectSize);
+                if (!ptr)
+                    continue;
+                auto* bytes = static_cast<unsigned char*>(ptr);
+                bytes[0] = static_cast<unsigned char>(i);
+                bytes[objectSize - 1] = static_cast<unsigned char>(i >> 8);
+                live.push_back(ptr);
+                if (live.size() == kLiveBatch)
+                {
+                    for (void* item : live)
+                        backendFree(backend, item, objectSize);
+                    live.clear();
+                }
+            }
+            for (void* item : live)
+                backendFree(backend, item, objectSize);
+        });
+    }
+    for (auto& thread : threads)
+        thread.join();
+    return timer.elapsedMs();
+}
+
+void printScalabilityMatrix()
+{
+    constexpr std::array<size_t, 7> kSizes{16, 32, 64, 256, 1024, 4096, 64 * 1024};
+    constexpr std::array<size_t, 4> kThreads{1, 2, 4, 8};
+    std::cout << "\nScalability matrix (25000 operations per thread, median of 3)\n";
+    std::cout << "  size threads       pool        new     malloc   pool/new pool/malloc\n";
+    for (size_t size : kSizes)
+    {
+        for (size_t threadCount : kThreads)
+        {
+            std::vector<double> poolRuns;
+            std::vector<double> newRuns;
+            std::vector<double> mallocRuns;
+            for (size_t repeat = 0; repeat < 3; ++repeat)
+            {
+                poolRuns.push_back(runScalabilityCase(Backend::Pool, size, threadCount));
+                newRuns.push_back(runScalabilityCase(Backend::NewDelete, size, threadCount));
+                mallocRuns.push_back(runScalabilityCase(Backend::MallocFree, size, threadCount));
+            }
+            const double poolMs = median(poolRuns);
+            const double newMs = median(newRuns);
+            const double mallocMs = median(mallocRuns);
+            std::cout << std::setw(6) << size << std::setw(8) << threadCount
+                      << std::setw(11) << std::fixed << std::setprecision(3) << poolMs
+                      << std::setw(11) << newMs << std::setw(11) << mallocMs
+                      << std::setw(11) << poolMs / newMs
+                      << std::setw(12) << poolMs / mallocMs << '\n';
+        }
+    }
+}
+
+double runCrossThreadCase(Backend backend, size_t objectSize)
+{
+    constexpr size_t kOperations = 50000;
+    std::vector<void*> pointers;
+    pointers.reserve(kOperations);
+    Timer timer;
+    std::thread producer([&]() {
+        for (size_t i = 0; i < kOperations; ++i)
+        {
+            void* ptr = backendAllocate(backend, objectSize);
+            if (ptr)
+                pointers.push_back(ptr);
+        }
+    });
+    producer.join();
+    std::thread consumer([&]() {
+        for (void* ptr : pointers)
+            backendFree(backend, ptr, objectSize);
+    });
+    consumer.join();
+    return timer.elapsedMs();
+}
+
+void printCrossThreadComparison()
+{
+    std::vector<double> poolRuns;
+    std::vector<double> newRuns;
+    std::vector<double> mallocRuns;
+    for (size_t repeat = 0; repeat < 5; ++repeat)
+    {
+        poolRuns.push_back(runCrossThreadCase(Backend::Pool, 64));
+        newRuns.push_back(runCrossThreadCase(Backend::NewDelete, 64));
+        mallocRuns.push_back(runCrossThreadCase(Backend::MallocFree, 64));
+    }
+    const double poolMs = median(poolRuns);
+    const double newMs = median(newRuns);
+    const double mallocMs = median(mallocRuns);
+    std::cout << "\nCross-thread ownership transfer (64B x 50000, median of 5)\n"
+              << "  pool=" << poolMs << " ms new=" << newMs
+              << " ms malloc=" << mallocMs << " ms\n"
+              << "  pool/new=" << poolMs / newMs
+              << " pool/malloc=" << poolMs / mallocMs << '\n';
 }
 
 void warmup()
@@ -374,6 +508,9 @@ int main()
     }
     printRunSummary("Mixed sizes (50000 allocs)", mixed);
 
+    printScalabilityMatrix();
+    printCrossThreadComparison();
+
     const MemoryPoolStats stats = MemoryPool::stats();
     std::cout << "\nPool stats:\n"
               << "  allocCount=" << stats.allocCount
@@ -384,7 +521,9 @@ int main()
               << "  sizedFreeCount=" << stats.sizedFreeCount
               << " unsizedFreeCount=" << stats.unsizedFreeCount << '\n'
               << "  centralRefillCount=" << stats.centralRefillCount
-              << " centralFlushCount=" << stats.centralFlushCount << '\n';
+              << " centralFlushCount=" << stats.centralFlushCount << '\n'
+              << "  reservedBytes=" << stats.reservedBytes
+              << " cachedPageBytes=" << stats.cachedPageBytes << '\n';
 
     return 0;
 }

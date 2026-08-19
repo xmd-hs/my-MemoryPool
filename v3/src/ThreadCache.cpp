@@ -29,6 +29,8 @@ bool debugMarkAllocated(Span* span, void* ptr)
     if (!span || span->isLarge)
         return true;
 
+    std::lock_guard<std::mutex> lock(span->debugMutex);
+
     const size_t blockIndex = debugBlockIndex(span, ptr);
     if (blockIndex >= span->debugAllocMap.size())
         return false;
@@ -45,6 +47,8 @@ bool debugValidateAndMarkFreed(Span* span, void* ptr, size_t expectedIndex)
         return true;
     if (!span)
         return false;
+
+    std::lock_guard<std::mutex> lock(span->debugMutex);
 
     if (span->isLarge)
     {
@@ -97,10 +101,11 @@ size_t ThreadCache::maxCachedBlocks(size_t size) const
 {
     constexpr size_t kBaseCacheBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kBaseCacheBytes / std::max(size, ALIGNMENT));
-    if (size <= 32) return std::min(n, size_t(4096));
-    if (size <= 64) return std::min(n, size_t(2048));
-    if (size <= 256) return std::min(n, size_t(1024));
-    if (size <= 1024) return std::min(n, size_t(256));
+    if (size <= 32) return 4096;
+    if (size <= 64) return 2048;
+    if (size <= 256) return 1024;
+    if (size <= 1024) return 256;
+    if (size <= 4096) return 512;
     return std::min(n, size_t(128));
 }
 

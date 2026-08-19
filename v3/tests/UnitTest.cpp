@@ -414,6 +414,8 @@ void testNoLeaksAfterMixedTraffic()
 
     const MemoryPoolStats after = MemoryPool::stats();
     assert(after.liveAllocs == before.liveAllocs);
+    assert(after.cachedPageBytes <= 64ull * 1024 * 1024);
+    assert(after.reservedBytes >= after.cachedPageBytes);
 
     std::cout << "No-leak mixed traffic test passed!" << std::endl;
 }

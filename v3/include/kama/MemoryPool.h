@@ -24,6 +24,8 @@ struct MemoryPoolStats
     std::uint64_t unsizedFreeCount{0};
     std::uint64_t centralRefillCount{0};
     std::uint64_t centralFlushCount{0};
+    std::uint64_t reservedBytes{0};
+    std::uint64_t cachedPageBytes{0};
 };
 
 class KAMA_API MemoryPool

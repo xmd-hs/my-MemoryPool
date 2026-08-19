@@ -72,6 +72,21 @@ Span* PageCache::findSpan(void* ptr)
     return findSpanLocked(ptr);
 }
 
+size_t PageCache::reservedBytes()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t total = 0;
+    for (const auto& allocation : systemAllocs_)
+        total += allocation.second;
+    return total;
+}
+
+size_t PageCache::cachedPageBytes()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cachedFreePages_ * systemPageSize();
+}
+
 void* PageCache::systemAlloc(size_t& numPages)
 {
     const size_t ps = systemPageSize();
@@ -120,6 +135,7 @@ Span* PageCache::allocateSpan(size_t numPages)
     if (it != freeSpans_.end())
     {
         Span* span = it->second;
+        cachedFreePages_ -= span->numPages;
         if (span->next)
             freeSpans_[it->first] = span->next;
         else
@@ -140,6 +156,7 @@ Span* PageCache::allocateSpan(size_t numPages)
             auto& list = freeSpans_[rest->numPages];
             rest->next = list;
             list = rest;
+            cachedFreePages_ += rest->numPages;
             registerPages(rest);
 
             span->numPages = numPages;
@@ -225,7 +242,10 @@ void PageCache::deallocateSpan(Span* span)
         }
     }
 
-    if (span->originAddr == span->pageAddr && span->numPages == span->originPages)
+    constexpr size_t kMaxCachedBytes = 64 * 1024 * 1024;
+    const size_t maxCachedPages = kMaxCachedBytes / systemPageSize();
+    if (span->originAddr == span->pageAddr && span->numPages == span->originPages &&
+        cachedFreePages_ + span->numPages > maxCachedPages)
     {
         releaseOrigin(span);
         return;
@@ -235,6 +255,7 @@ void PageCache::deallocateSpan(Span* span)
     auto& list = freeSpans_[span->numPages];
     span->next = list;
     list = span;
+    cachedFreePages_ += span->numPages;
 }
 
 bool PageCache::removeFromFreeList(Span* span)
@@ -246,6 +267,7 @@ bool PageCache::removeFromFreeList(Span* span)
     Span*& list = it->second;
     if (list == span)
     {
+        cachedFreePages_ -= span->numPages;
         list = span->next;
         if (!list)
             freeSpans_.erase(it);
@@ -259,6 +281,7 @@ bool PageCache::removeFromFreeList(Span* span)
     {
         if (prev->next == span)
         {
+            cachedFreePages_ -= span->numPages;
             prev->next = span->next;
             span->next = nullptr;
             span->inFreeList = false;

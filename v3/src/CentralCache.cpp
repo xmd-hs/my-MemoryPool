@@ -20,8 +20,15 @@ Span* CentralCache::createSpan(size_t index)
     const size_t ps = PageCache::pageSize();
     // Larger spans amortize CentralCache/PageCache synchronization for the
     // medium-size classes that dominate mixed allocation workloads.
-    size_t targetBytes = blockSize <= 256 ? size_t(32 * 1024)
-                                         : size_t(128 * 1024);
+    size_t targetBytes = 0;
+    if (blockSize <= 256)
+        targetBytes = 32 * 1024;
+    else if (blockSize <= 1024)
+        targetBytes = 128 * 1024;
+    else if (blockSize <= 4096)
+        targetBytes = 512 * 1024;
+    else
+        targetBytes = 2 * 1024 * 1024;
     targetBytes = std::max(ps, targetBytes);
     if (blockSize > targetBytes)
         targetBytes = ((blockSize + ps - 1) / ps) * ps;
