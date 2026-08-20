@@ -247,16 +247,147 @@ cmake --build .
 | v2 | 基础分配、写入、多线程、边界、压力 |
 | v3 | 上述 + size class、无 size 释放、对齐与 `newElement`、线程退出回血、统计、跨线程释放、异常安全、无泄露回归、调试保护 |
 
-### 测试环境
+### v3 性能测试方法
 
-| 项 | 值 |
-|----|----|
-| CPU | Apple M5（arm64，10 核） |
-| 内存 | 16 GB |
+测试程序为 `v3/tests/PerformanceTest.cpp`。每个场景运行 5 次，表格取中位数；
+v3 内存池、`new[]/delete[]` 和 `malloc/free` 使用相同的尺寸序列与释放模式。
+生产性能构建默认关闭全局统计与调试保护（`KAMA_MEMORY_POOL_ENABLE_STATS=OFF`、
+`KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF`），避免热路径额外开销。
+
+扩展矩阵覆盖 `16/32/64/256/1024/4096/65536B` 与 `1/2/4/8` 线程，每线程 25000
+次分配/释放，每个块写入首尾字节，每项 3 次取中位数。另含跨线程所有权转移测试
+（一线程分配 50000 个 64B 块，另一线程全部释放）。
+
+### v3 性能（Windows）
+
+| 项目 | 配置 |
+|------|------|
+| 系统 | Windows 10，x64 |
+| 编译器 | MSVC 19.44.35209 |
+| CMake | 3.31.6-msvc6 |
+| 构建 | Release |
+
+**中位数结果**
+
+| 场景 | v3 内存池 | `new[]/delete[]` | `malloc/free` | v3 相对最快系统方案 |
+|------|----------:|-----------------:|--------------:|--------------------:|
+| 32B 小对象，100000 次 | 2.322 ms | 5.082 ms | 5.178 ms | 快 54.3% |
+| 4 线程，每线程 25000 次 | 2.120 ms | 4.756 ms | 4.722 ms | 快 55.1% |
+| 16B–2048B 混合尺寸，50000 次 | 2.812 ms | 10.017 ms | 9.921 ms | 快 71.7% |
+
+**扩展矩阵（节选）**
+
+| 尺寸 | 线程 | v3 | new/delete | malloc/free |
+|-----:|-----:|---:|-----------:|------------:|
+| 16B | 1 | 0.400 ms | 1.101 ms | 1.012 ms |
+| 32B | 8 | 0.777 ms | 2.512 ms | 2.578 ms |
+| 256B | 8 | 0.744 ms | 3.502 ms | 3.313 ms |
+| 1KB | 8 | 0.813 ms | 5.188 ms | 4.396 ms |
+| 4KB | 8 | 1.149 ms | 5.959 ms | 4.696 ms |
+| 64KB | 8 | 84.162 ms | 638.919 ms | 639.161 ms |
+
+**跨线程所有权转移（64B × 50000）**
+
+| v3 | new/delete | malloc/free |
+|---:|-----------:|------------:|
+| 1.998 ms | 2.358 ms | 2.099 ms |
+
+**五轮原始数据（单位 ms）**
+
+| 场景 | 分配器 | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|------|--------|------:|------:|------:|------:|------:|
+| 32B 小对象 | v3 | 3.276 | 2.320 | 2.322 | 2.306 | 2.404 |
+| 32B 小对象 | new/delete | 6.048 | 5.082 | 5.029 | 4.879 | 5.210 |
+| 32B 小对象 | malloc/free | 5.178 | 4.863 | 4.913 | 5.333 | 5.444 |
+| 4 线程 | v3 | 3.043 | 1.865 | 2.418 | 2.120 | 1.820 |
+| 4 线程 | new/delete | 5.366 | 5.052 | 4.526 | 4.702 | 4.756 |
+| 4 线程 | malloc/free | 4.556 | 4.801 | 4.722 | 5.000 | 4.339 |
+| 混合尺寸 | v3 | 6.045 | 2.812 | 2.954 | 2.805 | 2.714 |
+| 混合尺寸 | new/delete | 10.029 | 9.782 | 10.040 | 9.602 | 10.017 |
+| 混合尺寸 | malloc/free | 9.832 | 10.165 | 9.921 | 10.415 | 9.530 |
+
+Windows 复现：
+
+```powershell
+cmake -S v3 -B v3/build-release `
+  -DKAMA_MEMORY_POOL_BUILD_TESTS=ON `
+  -DKAMA_MEMORY_POOL_ENABLE_STATS=OFF `
+  -DKAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF
+cmake --build v3/build-release --config Release --parallel
+.\v3\build-release\Release\perf_test.exe
+```
+
+### v3 性能（macOS）
+
+| 项目 | 配置 |
+|------|------|
+| CPU | Apple M5（arm64） |
 | 系统 | macOS 26.5 |
-| 编译器 | Apple clang 21.0.0，`-O2` |
+| 编译器 | Apple clang 21.0.0 |
+| 构建 | Release（`-O2`） |
+| 统计 | `KAMA_MEMORY_POOL_ENABLE_STATS=OFF` |
+| 调试保护 | `KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF` |
 
-Apple 平台的系统分配器（libmalloc）本身很快，下列数字用于对比本仓库各版本，而不是宣称「一定快过所有 malloc」。
+**中位数结果**
+
+| 场景 | v3 内存池 | `new[]/delete[]` | `malloc/free` | v3 相对最快系统方案 |
+|------|----------:|-----------------:|--------------:|--------------------:|
+| 32B 小对象，100000 次 | 1.569 ms | 1.719 ms | 1.496 ms | 慢 4.9% |
+| 4 线程，每线程 25000 次 | 2.800 ms | 4.462 ms | 4.505 ms | 快 37.2% |
+| 16B–2048B 混合尺寸，50000 次 | 1.494 ms | 2.438 ms | 1.991 ms | 快 25.0% |
+
+**扩展矩阵（节选）**
+
+| 尺寸 | 线程 | v3 | new/delete | malloc/free |
+|-----:|-----:|---:|-----------:|------------:|
+| 16B | 1 | 0.202 ms | 0.419 ms | 0.349 ms |
+| 32B | 8 | 0.341 ms | 0.708 ms | 0.766 ms |
+| 256B | 8 | 0.376 ms | 1.641 ms | 1.653 ms |
+| 1KB | 8 | 0.530 ms | 8.121 ms | 9.174 ms |
+| 4KB | 8 | 0.558 ms | 33.633 ms | 30.971 ms |
+| 64KB | 8 | 99.647 ms | 173.590 ms | 176.830 ms |
+
+**跨线程所有权转移（64B × 50000）**
+
+| v3 | new/delete | malloc/free |
+|---:|-----------:|------------:|
+| 1.012 ms | 0.890 ms | 0.748 ms |
+
+**五轮原始数据（单位 ms）**
+
+| 场景 | 分配器 | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|------|--------|------:|------:|------:|------:|------:|
+| 32B 小对象 | v3 | 1.778 | 1.614 | 1.557 | 1.564 | 1.569 |
+| 32B 小对象 | new/delete | 2.233 | 1.719 | 1.714 | 1.717 | 1.800 |
+| 32B 小对象 | malloc/free | 1.761 | 1.891 | 1.496 | 1.495 | 1.495 |
+| 4 线程 | v3 | 2.800 | 3.711 | 4.317 | 1.679 | 2.646 |
+| 4 线程 | new/delete | 5.486 | 4.745 | 4.205 | 4.462 | 4.182 |
+| 4 线程 | malloc/free | 5.435 | 4.505 | 4.235 | 4.212 | 4.517 |
+| 混合尺寸 | v3 | 2.759 | 2.111 | 1.494 | 1.480 | 1.450 |
+| 混合尺寸 | new/delete | 9.857 | 2.651 | 2.438 | 1.993 | 2.103 |
+| 混合尺寸 | malloc/free | 10.066 | 2.481 | 1.839 | 1.876 | 1.991 |
+
+macOS 复现：
+
+```bash
+cmake -S v3 -B v3/build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKAMA_MEMORY_POOL_BUILD_TESTS=ON \
+  -DKAMA_MEMORY_POOL_ENABLE_STATS=OFF \
+  -DKAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF
+cmake --build v3/build-release --parallel
+./v3/build-release/perf_test
+```
+
+无 CMake 时：
+
+```bash
+clang++ -std=c++17 -O2 -pthread -DKAMA_MEMORY_POOL_STATS_ENABLED=0 \
+  -I v3/include -I v3/src \
+  v3/src/*.cpp v3/tests/PerformanceTest.cpp \
+  -o v3/build/perf_test
+./v3/build/perf_test
+```
 
 ### v1 性能
 
@@ -280,43 +411,14 @@ Apple 平台的系统分配器（libmalloc）本身很快，下列数字用于�
 | 4 线程 | 11.660 ms | 4.044 ms |
 | 混合尺寸 | 2.898 ms | 2.556 ms |
 
-### v3 性能
-
-Windows / MSVC Release 的最新三路对比（v3、`new/delete`、`malloc/free`）见
-[v3/WINDOWS_BENCHMARK.md](v3/WINDOWS_BENCHMARK.md)。生产性能构建默认关闭全局统计，
-需要调用 `MemoryPool::stats()` 获取计数时请显式设置
-`KAMA_MEMORY_POOL_ENABLE_STATS=ON`。
-
-墙钟时间。`v3/tests/PerformanceTest.cpp` 使用固定 seed、线程局部随机数，每项跑 5 轮取中位数。负载与 v2 不完全相同，不要直接横向对比。
-
-| 场景 | 内存池（中位数） | `new`/`delete`（中位数） |
-|------|------------------|--------------------------|
-| 小对象 32B × 100000 | 2.688 ms | 2.463 ms |
-| 4 线程 × 25000 | 12.491 ms | 4.563 ms |
-| 混合尺寸 × 50000 | 6.151 ms | 2.225 ms |
-
-五轮原始数据（单位 ms）：
-
-| 场景 | 池 Run1 | 池 Run2 | 池 Run3 | 池 Run4 | 池 Run5 | new Run1 | new Run2 | new Run3 | new Run4 | new Run5 |
-|------|---------|---------|---------|---------|---------|----------|----------|----------|----------|----------|
-| 小对象 32B × 100000 | 3.398 | 2.997 | 2.688 | 2.494 | 2.483 | 2.951 | 2.463 | 2.606 | 2.406 | 2.087 |
-| 4 线程 × 25000 | 15.071 | 11.531 | 11.101 | 13.671 | 12.491 | 5.171 | 4.594 | 4.563 | 4.234 | 4.291 |
-| 混合尺寸 × 50000 | 5.182 | 6.151 | 6.531 | 5.663 | 6.472 | 5.219 | 2.585 | 2.163 | 2.225 | 2.112 |
-
-同一轮测试里 `stats()` 输出为：
-
-```text
-allocCount=1255000 freeCount=1255000 liveAllocs=0
-smallAllocCount=1255000 largeAllocCount=0
-sizedFreeCount=1255000 unsizedFreeCount=0
-centralRefillCount=707996 centralFlushCount=656307
-```
-
 ### 怎么读这些数字
 
 - **v1** 适合说明「定长池在单线程能赢」，也适合说明「一把全局锁在多线程会输得很明显」。
-- **v2 / v3** 热路径走线程本地缓存，多线程不再像 v1 那样随线程数崩溃，但在 Apple libmalloc 上仍可能略慢或接近。池的价值更多在：稳定的 size class、可归还 OS、跨平台页分配、可控的调试与统计能力，以及 malloc 较慢的环境（部分 Linux glibc、高碎片服务）。
-- 复现：在 `v3/build` 编译后运行 `perf_test`。v1 已对 `new`/`delete` 做防优化处理（函数指针 + compiler barrier），否则 `-O2` 会把空对象的 new/delete 整段消掉。
+- **v2** 是三层缓存的早期对照版本，负载与 v3 不完全相同，不宜直接横向对比。
+- **v3 / Windows**：MSVC Release 下，三路对比中 v3 在三类主场景和扩展矩阵中均快于 `new/delete` 与 `malloc/free`；大对象（64KB）和多线程扩展场景优势尤其明显。
+- **v3 / macOS**：Apple libmalloc 很强，32B 单线程场景 v3 与系统分配器接近（中位数略慢约 5%）；多线程与混合尺寸场景 v3 仍明显更快。跨线程所有权转移场景 macOS 上系统分配器更优。
+- 性能结果只代表上述机器和工作负载。需要 `MemoryPool::stats()` 计数时请设置 `KAMA_MEMORY_POOL_ENABLE_STATS=ON`。
+- 复现：见上文 Windows / macOS 复现命令。v1 已对 `new/delete` 做防优化处理，否则 `-O2` 会把空对象的 new/delete 整段消掉。
 
 ## 许可证
 

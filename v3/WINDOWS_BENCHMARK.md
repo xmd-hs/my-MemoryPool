@@ -1,5 +1,8 @@
 # v3 Windows 性能测试
 
+完整 Windows / macOS 对比数据已合并到根目录 [README.md](../README.md) 的「测试」章节。
+本文档保留 Windows 侧的详细说明与复现步骤。
+
 ## 测试环境
 
 | 项目 | 配置 |
