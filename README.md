@@ -32,13 +32,125 @@ my-MemoryPool/
 - 自由链表：带版本号的 CAS（tagged pointer），避免 ABA
 - 块内 bump 分配，用互斥锁保护扩块
 
-## v2 / v3 架构
+### v1 架构
+
+```mermaid
+flowchart TB
+    subgraph app [Application]
+        Alloc["allocate(size)"]
+        Free["deallocate(ptr)"]
+    end
+
+    subgraph router [Size Router]
+        Hash["hash(size / 8B)<br/>64 fixed pools"]
+    end
+
+    subgraph pool [Fixed Pool per Size Class]
+        FreeList["Lock-free free list<br/>CAS + tagged pointer"]
+        Bump["Bump pointer<br/>within block"]
+        Mutex["std::mutex<br/>expand block only"]
+        Block["Memory block"]
+    end
+
+    Alloc --> Hash
+    Free --> Hash
+    Hash --> FreeList
+    FreeList -->|"hit"| Alloc
+    FreeList -->|"miss"| Bump
+    Bump --> Mutex
+    Mutex --> Block
+    Block --> Bump
+```
+
+## v2
+
+三层缓存的早期对照实现，固定 size class，中心缓存延迟归还 span。
+
+- **ThreadCache**：线程本地自由链表，热路径无锁
+- **CentralCache**：按 size class 分片同步，延迟把空闲 span 还给页缓存
+- **PageCache**：按系统页向 OS 申请，支持 span 切分
+
+### v2 架构
+
+```mermaid
+flowchart TB
+    subgraph thread [Per Thread]
+        TC["ThreadCache<br/>thread_local free lists"]
+    end
+
+    subgraph central [CentralCache]
+        Shard["Per size-class shard"]
+        Spin["SpinLock / sync"]
+        Partial["Partial span list"]
+    end
+
+    subgraph page [PageCache]
+        Span["Span management"]
+        FreeSpan["Free span list"]
+        OS["OS pages<br/>mmap / VirtualAlloc"]
+    end
+
+    TC -->|"refill / flush"| Shard
+    Shard --> Spin
+    Spin --> Partial
+    Partial -->|"fetch span"| Span
+    Partial -->|"delayed return"| Span
+    Span --> FreeSpan
+    FreeSpan --> OS
+    OS --> Span
+```
+
+## v3
+
+在 v2 三层结构上演进为可安装 SDK，支持几何 size class、页映射与整 span 归还 OS。
 
 三层缓存：
 
 - **ThreadCache**：线程本地自由链表，热路径无锁；线程退出时把残留块还给中心缓存
-- **CentralCache**：按 size class 分片自旋锁；v3 按 span 管理自由块，整段空闲后归还 PageCache
-- **PageCache**：按系统页向 OS 申请（Linux/macOS `mmap`，Windows `VirtualAlloc`），支持前后合并；完整映射可归还 OS
+- **CentralCache**：按 size class 分片自旋锁；按 span 管理自由块，整段空闲后归还 PageCache
+- **PageCache**：按系统页向 OS 申请，支持前后合并；完整映射可归还 OS
+
+### v3 架构
+
+```mermaid
+flowchart TB
+    subgraph sdk [SDK Surface]
+        Cpp["C++ API"]
+        Stl["STL Allocator"]
+        Capi["C ABI"]
+    end
+
+    subgraph thread [ThreadCache per thread]
+        LocalList["Local free lists<br/>lock-free hot path"]
+        SizedFree["sized free fast path"]
+    end
+
+    subgraph central [CentralCache]
+        SizeClass["Geometric size class<br/>约 60 档 8B-256KB"]
+        ShardLock["Cache-line aligned<br/>atomic_flag spinlock"]
+        SpanBlocks["Span free block lists"]
+    end
+
+    subgraph page [PageCache]
+        PageMap["Page map<br/>shared_mutex lookup"]
+        Merge["Span split / coalesce"]
+        CacheBudget["Cached page budget<br/>return full mapping to OS"]
+        OS["OS pages<br/>mmap / VirtualAlloc"]
+    end
+
+    Cpp --> LocalList
+    Stl --> LocalList
+    Capi --> LocalList
+    LocalList --> SizedFree
+    LocalList -->|"batch refill / flush"| SizeClass
+    SizeClass --> ShardLock
+    ShardLock --> SpanBlocks
+    SpanBlocks -->|"allocate / release span"| Merge
+    Merge --> PageMap
+    PageMap --> CacheBudget
+    CacheBudget --> OS
+    OS --> Merge
+```
 
 ### v3 相比 v2 的增强
 
