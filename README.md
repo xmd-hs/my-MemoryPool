@@ -63,9 +63,23 @@ my-MemoryPool/
 │   ├── tests/                  单元、基准和压力测试
 │   ├── examples/               最小接入示例
 │   ├── cmake/                  CMake package 配置
-│   ├── WINDOWS_BENCHMARK.md   Windows 原始记录
-│   └── linux-performance.txt   Linux 原始记录
 └── README.md
+```
+
+### v3 架构示意图
+
+```mermaid
+flowchart TB
+    A[应用代码 / STL 容器 / C API] --> B[MemoryPool API]
+    B --> C{请求大小与对齐}
+    C -->|小对象| D[ThreadCache\n每线程本地空闲链表]
+    D -->|批量 refill / flush| E[CentralCache\n按 size class 分片]
+    E --> F[Span block lists\n自旋锁保护]
+    F -->|申请或归还 span| G[PageCache\n页映射与 span 管理]
+    G --> H[分割 / 相邻合并\n缓存预算控制]
+    H --> I[OS pages\nVirtualAlloc / mmap]
+    C -->|大对象或对齐请求| G
+    G -->|释放完整映射| I
 ```
 
 ```text
@@ -94,7 +108,7 @@ cmake --build v3/build-release --target perf
 ctest --test-dir v3/build-release --output-on-failure
 ```
 
-性能测试覆盖 16/32/64/256/1024/4096/65536B、1/2/4/8 线程、混合尺寸、实际内存写入和跨线程所有权转移，并对比 `new/delete` 与 `malloc/free`。Linux 可手动使用 `v3/Dockerfile.linux_perf` 复现实验环境；该 Docker 文件不是自动 CI。
+性能测试覆盖 16/32/64/256/1024/4096/65536B、1/2/4/8 线程、混合尺寸、实际内存写入和跨线程所有权转移，并对比 `new/delete` 与 `malloc/free`。Linux 可手动使用 `v3/Dockerfile.linux_perf` 复现实验环境；该 Docker 文件不是自动 CI。所有已测数据均集中维护在本 README，不再依赖额外的原始记录文件。
 
 ## 使用示例
 
