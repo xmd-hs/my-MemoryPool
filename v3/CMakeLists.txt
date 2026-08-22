@@ -122,6 +122,27 @@ if(KAMA_MEMORY_POOL_BUILD_TESTS)
         DEPENDS perf_test
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
+
+    # Google Benchmark 性能测试
+    option(KAMA_MEMORY_POOL_USE_BENCHMARK "Build Google Benchmark based tests" OFF)
+    if(KAMA_MEMORY_POOL_USE_BENCHMARK)
+        include(FetchContent)
+        set(BENCHMARK_ENABLE_TESTING OFF CACHE INTERNAL "")
+        set(BENCHMARK_ENABLE_INSTALL OFF CACHE INTERNAL "")
+        FetchContent_Declare(
+            googlebench
+            GIT_REPOSITORY https://github.com/google/benchmark.git
+            GIT_TAG v1.8.5
+        )
+        FetchContent_MakeAvailable(googlebench)
+
+        add_executable(bench_test tests/BenchmarkTest.cpp)
+        target_link_libraries(bench_test PRIVATE kama_memory_pool benchmark::benchmark)
+        if(KAMA_SANITIZER_FLAGS)
+            target_compile_options(bench_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+            target_link_options(bench_test PRIVATE ${KAMA_SANITIZER_FLAGS})
+        endif()
+    endif()
 endif()
 
 if(KAMA_MEMORY_POOL_BUILD_EXAMPLES)
