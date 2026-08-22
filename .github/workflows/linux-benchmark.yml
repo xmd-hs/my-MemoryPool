@@ -9,6 +9,8 @@ jobs:
   benchmark:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -25,6 +27,14 @@ jobs:
         run: ctest --test-dir v3/build-linux --output-on-failure -R kama_unit_test
       - name: Performance benchmark
         run: ./v3/build-linux/perf_test | tee v3/build-linux/linux-performance.txt
+      - name: Publish Linux result
+        run: |
+          cp v3/build-linux/linux-performance.txt v3/linux-performance.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add v3/linux-performance.txt
+          git diff --cached --quiet || git commit -m "记录Linux性能测试数据 [skip ci]"
+          git push
       - name: Upload benchmark result
         uses: actions/upload-artifact@v4
         with:

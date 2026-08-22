@@ -1,5 +1,13 @@
 # my-MemoryPool
 
+## Linux 实测数据
+
+Linux 性能测试由 `.github/workflows/linux-benchmark.yml` 在 Ubuntu 22.04 runner 上执行，
+结果会自动写入 [v3/linux-performance.txt](v3/linux-performance.txt)。测试同时比较 v3、
+`new/delete` 和 `malloc/free`，覆盖小对象、混合尺寸、16B/32B/64B/256B/1KB/4KB/64KB
+与 1/2/4/8 线程扩展矩阵，以及跨线程所有权转移。该文件中的数值只接受 Linux runner
+生成的结果，不使用 Windows 或 macOS 数据。
+
 基于 C++ 实现的多层内存池，用于降低频繁小对象分配时的系统调用开销，并控制多线程下的锁竞争。
 
 仓库包含三个演进版本：
@@ -501,6 +509,88 @@ clang++ -std=c++17 -O2 -pthread -DKAMA_MEMORY_POOL_STATS_ENABLED=0 \
 ./v3/build/perf_test
 ```
 
+### v3 性能（Linux）
+
+| 项目 | 配置 |
+|------|------|
+| 系统 | Ubuntu 22.04 LTS，x86_64 |
+| 内核 | 5.15 |
+| 编译器 | GCC 11.x (`-O2`) |
+| CMake | 3.22 |
+| 构建 | Release |
+| 统计 | `KAMA_MEMORY_POOL_ENABLE_STATS=OFF` |
+| 调试保护 | `KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF` |
+
+> 数据待补充——请在 Linux 环境运行下方复现命令后将结果填入。
+
+**中位数结果**
+
+| 场景 | v3 内存池 | `new[]/delete[]` | `malloc/free` | v3 相对最快系统方案 |
+|------|----------:|-----------------:|--------------:|--------------------:|
+| 32B 小对象，100000 次 | — ms | — ms | — ms | — |
+| 4 线程，每线程 25000 次 | — ms | — ms | — ms | — |
+| 16B–2048B 混合尺寸，50000 次 | — ms | — ms | — ms | — |
+
+**扩展矩阵（节选）**
+
+| 尺寸 | 线程 | v3 | new/delete | malloc/free |
+|-----:|-----:|---:|-----------:|------------:|
+| 16B | 1 | — ms | — ms | — ms |
+| 32B | 8 | — ms | — ms | — ms |
+| 256B | 8 | — ms | — ms | — ms |
+| 1KB | 8 | — ms | — ms | — ms |
+| 4KB | 8 | — ms | — ms | — ms |
+| 64KB | 8 | — ms | — ms | — ms |
+
+**跨线程所有权转移（64B × 50000）**
+
+| v3 | new/delete | malloc/free |
+|---:|-----------:|------------:|
+| — ms | — ms | — ms |
+
+**五轮原始数据（单位 ms）**
+
+| 场景 | 分配器 | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|------|--------|------:|------:|------:|------:|------:|
+| 32B 小对象 | v3 | — | — | — | — | — |
+| 32B 小对象 | new/delete | — | — | — | — | — |
+| 32B 小对象 | malloc/free | — | — | — | — | — |
+| 4 线程 | v3 | — | — | — | — | — |
+| 4 线程 | new/delete | — | — | — | — | — |
+| 4 线程 | malloc/free | — | — | — | — | — |
+| 混合尺寸 | v3 | — | — | — | — | — |
+| 混合尺寸 | new/delete | — | — | — | — | — |
+| 混合尺寸 | malloc/free | — | — | — | — | — |
+
+Linux 复现（Docker）：
+
+```bash
+docker build -f v3/Dockerfile.linux_perf -t kama-perf-linux v3/
+docker run --rm kama-perf-linux
+```
+
+Linux 复现（本机编译）：
+
+```bash
+cmake -S v3 -B v3/build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKAMA_MEMORY_POOL_BUILD_TESTS=ON \
+  -DKAMA_MEMORY_POOL_ENABLE_STATS=OFF \
+  -DKAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF
+cmake --build v3/build-release --parallel
+./v3/build-release/perf_test
+```
+
+无 CMake 时：
+
+```bash
+g++ -std=c++17 -O2 -pthread -DKAMA_MEMORY_POOL_STATS_ENABLED=0 \
+  -I v3/include -I v3/src \
+  v3/src/*.cpp v3/tests/PerformanceTest.cpp \
+  -o v3/build/perf_test
+./v3/build/perf_test
+```
+
 ### v1 性能
 
 负载：每轮 `10000` 次分配，每次分配/释放 4 种小对象（约 4B–80B），共 10 轮。表中为**各线程耗时之和**（不是墙钟）。
@@ -529,8 +619,9 @@ clang++ -std=c++17 -O2 -pthread -DKAMA_MEMORY_POOL_STATS_ENABLED=0 \
 - **v2** 是三层缓存的早期对照版本，负载与 v3 不完全相同，不宜直接横向对比。
 - **v3 / Windows**：MSVC Release 下，三路对比中 v3 在三类主场景和扩展矩阵中均快于 `new/delete` 与 `malloc/free`；大对象（64KB）和多线程扩展场景优势尤其明显。
 - **v3 / macOS**：Apple libmalloc 很强，32B 单线程场景 v3 与系统分配器接近（中位数略慢约 5%）；多线程与混合尺寸场景 v3 仍明显更快。跨线程所有权转移场景 macOS 上系统分配器更优。
+- **v3 / Linux**：数据待补充。可在 Linux 环境使用 Docker 或本机编译运行上方复现命令获取。
 - 性能结果只代表上述机器和工作负载。需要 `MemoryPool::stats()` 计数时请设置 `KAMA_MEMORY_POOL_ENABLE_STATS=ON`。
-- 复现：见上文 Windows / macOS 复现命令。v1 已对 `new/delete` 做防优化处理，否则 `-O2` 会把空对象的 new/delete 整段消掉。
+- 复现：见上文 Windows / macOS / Linux 复现命令。v1 已对 `new/delete` 做防优化处理，否则 `-O2` 会把空对象的 new/delete 整段消掉。
 
 ## 许可证
 
