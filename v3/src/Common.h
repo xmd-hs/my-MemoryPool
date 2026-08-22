@@ -52,7 +52,7 @@ public:
             cpuPause();
             // Central critical sections are short; on Linux a premature
             // scheduler yield costs more than a few additional pauses.
-            if (++spins >= 512)
+            if (++spins >= 1024)
                 std::this_thread::yield();
         }
     }
