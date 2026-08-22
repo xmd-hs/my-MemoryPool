@@ -1,5 +1,34 @@
 # my-MemoryPool
 
+## Linux 实测数据（Ubuntu 22.04 / GCC Release）
+
+数据由 GitHub Actions 的 Ubuntu 22.04 runner 实际生成，commit `2adec58`，统计和
+Debug Guards 均关闭。每项取 5 次中位数，单位为毫秒；同一负载同时比较 v3、
+`new/delete` 和 `malloc/free`。
+
+| 场景 | v3 | new/delete | malloc/free |
+|---|---:|---:|---:|
+| 32B 小对象，100000 次 | 2.683 | 4.120 | 4.013 |
+| 4 线程，每线程 25000 次 | 3.977 | 4.032 | 2.374 |
+| 16B-2048B 混合尺寸，50000 次 | 2.832 | 8.398 | 7.876 |
+| 跨线程所有权转移，64B x 50000 | 1.751 | 1.405 | 1.199 |
+
+扩展矩阵（v3 / new/delete / malloc/free，中位数 ms）：
+
+| 尺寸 | 线程 | v3 | new/delete | malloc/free |
+|---:|---:|---:|---:|---:|
+| 16B | 1 | 0.325 | 0.624 | 0.516 |
+| 16B | 8 | 1.423 | 3.063 | 2.216 |
+| 32B | 8 | 1.665 | 2.979 | 2.107 |
+| 256B | 8 | 1.717 | 3.689 | 3.910 |
+| 1KB | 8 | 1.507 | 5.392 | 4.477 |
+| 4KB | 8 | 1.988 | 4.421 | 3.796 |
+| 64KB | 8 | 36.307 | 172.518 | 174.898 |
+
+Linux 运行期间 `reservedBytes=67534848`、`cachedPageBytes=65175552`；缓存页预算为
+64 MiB，未超过上限。完整原始输出由 workflow 保存为 artifact，并同步到
+`v3/linux-performance.txt`。
+
 ## Linux 实测数据
 
 Linux 性能测试由 `.github/workflows/linux-benchmark.yml` 在 Ubuntu 22.04 runner 上执行，
