@@ -50,7 +50,9 @@ public:
         while (flag_.test_and_set(std::memory_order_acquire))
         {
             cpuPause();
-            if (++spins >= 64)
+            // Central critical sections are short; on Linux a premature
+            // scheduler yield costs more than a few additional pauses.
+            if (++spins >= 256)
                 std::this_thread::yield();
         }
     }
