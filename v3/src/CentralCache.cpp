@@ -16,7 +16,7 @@ CentralCache::CentralCache()
         shard.partial = nullptr;
     }
     for (auto& remote : remoteFreeLists_)
-        remote.store(nullptr, std::memory_order_relaxed);
+        remote.head.store(nullptr, std::memory_order_relaxed);
 }
 
 size_t CentralCache::localShardId() const
@@ -118,6 +118,38 @@ void* CentralCache::popOneFromShardLocked(size_t shardIdx)
     return obj;
 }
 
+size_t CentralCache::popRangeFromShardLocked(size_t shardIdx, size_t limit,
+                                             void*& head, void*& tail)
+{
+    head = nullptr;
+    tail = nullptr;
+    if (limit == 0)
+        return 0;
+
+    Span* span = shards_[shardIdx].partial;
+    if (!span || !span->freeList)
+        return 0;
+
+    head = span->freeList;
+    tail = head;
+    size_t count = 1;
+    while (count < limit && *reinterpret_cast<void**>(tail))
+    {
+        tail = *reinterpret_cast<void**>(tail);
+        ++count;
+    }
+
+    span->freeList = *reinterpret_cast<void**>(tail);
+    *reinterpret_cast<void**>(tail) = nullptr;
+    span->freeCount -= count;
+    if (span->freeCount == 0)
+    {
+        shards_[shardIdx].partial = span->next;
+        span->next = nullptr;
+    }
+    return count;
+}
+
 CentralCache::ReturnAction CentralCache::returnSpanGroupLocked(
     Span* span, void* head, size_t shardIdx, size_t sizeClassIndex)
 {
@@ -202,25 +234,25 @@ void CentralCache::returnGroups(size_t index, size_t preferredShardId,
 
 void CentralCache::mergeRemoteFrees(size_t index, size_t shardId)
 {
-    void* remoteHead = remoteFreeLists_[index].exchange(nullptr, std::memory_order_acq_rel);
-    if (!remoteHead)
-        return;
-
     PageCache& cache = PageCache::getInstance();
     std::unordered_map<Span*, void*> groups;
     groups.reserve(16);
-
-    void* cur = remoteHead;
-    while (cur)
+    for (size_t remoteShard = 0; remoteShard < kCentralShardCount; ++remoteShard)
     {
-        void* next = *reinterpret_cast<void**>(cur);
-        Span* span = cache.findSpan(cur);
-        if (span && span->sizeClass == index)
+        void* remoteHead = remoteFreeLists_[index * kCentralShardCount + remoteShard]
+                               .head.exchange(nullptr, std::memory_order_acq_rel);
+        void* cur = remoteHead;
+        while (cur)
         {
-            *reinterpret_cast<void**>(cur) = groups[span];
-            groups[span] = cur;
+            void* next = *reinterpret_cast<void**>(cur);
+            Span* span = cache.findSpan(cur);
+            if (span && span->sizeClass == index)
+            {
+                *reinterpret_cast<void**>(cur) = groups[span];
+                groups[span] = cur;
+            }
+            cur = next;
         }
-        cur = next;
     }
 
     returnGroups(index, shardId, groups);
@@ -231,11 +263,13 @@ void CentralCache::pushRemoteFree(void* ptr, size_t index)
     if (!ptr || index >= FREE_LIST_SIZE)
         return;
 
-    void* head = remoteFreeLists_[index].load(std::memory_order_relaxed);
+    const size_t shard = localShardId();
+    auto& remote = remoteFreeLists_[index * kCentralShardCount + shard].head;
+    void* head = remote.load(std::memory_order_relaxed);
     do
     {
         *reinterpret_cast<void**>(ptr) = head;
-    } while (!remoteFreeLists_[index].compare_exchange_weak(
+    } while (!remote.compare_exchange_weak(
         head, ptr, std::memory_order_release, std::memory_order_relaxed));
 
     recordRemoteFree(1);
@@ -258,30 +292,34 @@ void* CentralCache::fetchRange(size_t index, size_t batchNum, size_t& fetchedCou
 
     while (got < batchNum)
     {
-        void* obj = nullptr;
+        void* rangeHead = nullptr;
+        void* rangeTail = nullptr;
+        size_t rangeCount = 0;
         {
             SpinLock guard(shards_[primaryShard].lock);
-            obj = popOneFromShardLocked(primaryShard);
+            rangeCount = popRangeFromShardLocked(primaryShard, batchNum - got,
+                                                 rangeHead, rangeTail);
         }
 
-        if (!obj)
+        if (!rangeCount)
         {
-            for (size_t i = 1; i < kCentralShardCount && !obj; ++i)
+            for (size_t i = 1; i < kCentralShardCount && !rangeCount; ++i)
             {
                 const size_t otherShard = shardIndex(index, (shardId + i) % kCentralShardCount);
                 SpinLock guard(shards_[otherShard].lock);
-                obj = popOneFromShardLocked(otherShard);
+                rangeCount = popRangeFromShardLocked(otherShard, batchNum - got,
+                                                     rangeHead, rangeTail);
             }
         }
 
-        if (obj)
+        if (rangeCount)
         {
             if (!head)
-                head = obj;
+                head = rangeHead;
             else
-                *reinterpret_cast<void**>(tail) = obj;
-            tail = obj;
-            ++got;
+                *reinterpret_cast<void**>(tail) = rangeHead;
+            tail = rangeTail;
+            got += rangeCount;
             continue;
         }
 
@@ -294,6 +332,24 @@ void* CentralCache::fetchRange(size_t index, size_t batchNum, size_t& fetchedCou
             span->centralShard.store(primaryShard, std::memory_order_relaxed);
             span->next = shards_[primaryShard].partial;
             shards_[primaryShard].partial = span;
+
+            // The new span is already published under the shard lock. Take
+            // its first range immediately instead of repeating the lock/search
+            // cycle on the next loop iteration.
+            rangeHead = nullptr;
+            rangeTail = nullptr;
+            rangeCount = popRangeFromShardLocked(primaryShard, batchNum - got,
+                                                 rangeHead, rangeTail);
+        }
+
+        if (rangeCount)
+        {
+            if (!head)
+                head = rangeHead;
+            else
+                *reinterpret_cast<void**>(tail) = rangeHead;
+            tail = rangeTail;
+            got += rangeCount;
         }
     }
 
@@ -301,14 +357,14 @@ void* CentralCache::fetchRange(size_t index, size_t batchNum, size_t& fetchedCou
     return head;
 }
 
-void CentralCache::returnRange(void* start, size_t /*blockCount*/, size_t index)
+void CentralCache::returnRange(void* start, size_t blockCount, size_t index)
 {
     if (!start || index >= FREE_LIST_SIZE)
         return;
 
     PageCache& cache = PageCache::getInstance();
     std::unordered_map<Span*, void*> groups;
-    groups.reserve(16);
+    groups.reserve(std::min<size_t>(blockCount, 64));
 
     void* cur = start;
     while (cur)

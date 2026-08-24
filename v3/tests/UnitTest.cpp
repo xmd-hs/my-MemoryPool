@@ -196,9 +196,10 @@ void testSizeClasses()
 
     for (size_t n = 1; n <= 4096; ++n)
     {
-        size_t rounded = SizeClass::roundUp(n);
+        const size_t rounded = SizeClass::roundUp(n);
         assert(rounded >= n);
         assert(rounded == SizeClass::getSize(SizeClass::getIndex(n)));
+        (void)rounded;
     }
 
     std::cout << "Size class test passed!" << std::endl;
@@ -289,13 +290,15 @@ void testStatsAndSizedFreePath()
 {
     std::cout << "Running stats / sized free test..." << std::endl;
 
-    if constexpr (!kStatsEnabled)
+#if !KAMA_MEMORY_POOL_STATS_ENABLED
     {
         std::cout << "Statistics disabled, skipping." << std::endl;
         return;
     }
-
+#else
+#if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
+#endif
 
     void* p1 = MemoryPool::allocate(24);
     void* p2 = MemoryPool::allocate(512 * 1024);
@@ -305,6 +308,7 @@ void testStatsAndSizedFreePath()
     MemoryPool::deallocate(p1, 24);
     MemoryPool::deallocate(p2, 512 * 1024);
 
+#if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
     assert(after.allocCount >= before.allocCount + 2);
     assert(after.freeCount >= before.freeCount + 2);
@@ -315,6 +319,8 @@ void testStatsAndSizedFreePath()
     assert(after.centralFlushCount >= before.centralFlushCount);
 
     std::cout << "Stats / sized free test passed!" << std::endl;
+#endif
+#endif
 }
 
 void testCrossThreadSizedFree()
@@ -352,7 +358,9 @@ void testNewElementExceptionSafety()
         ThrowOnConstruct() { throw std::runtime_error("boom"); }
     };
 
+#if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
+#endif
     bool thrown = false;
     try
     {
@@ -363,11 +371,16 @@ void testNewElementExceptionSafety()
         thrown = true;
     }
     assert(thrown);
+    (void)thrown;
 
-    const MemoryPoolStats after = MemoryPool::stats();
-    assert(after.allocCount >= before.allocCount + 1);
-    assert(after.freeCount >= before.freeCount + 1);
-    assert(after.liveAllocs == before.liveAllocs);
+#if KAMA_MEMORY_POOL_STATS_ENABLED
+    {
+        const MemoryPoolStats after = MemoryPool::stats();
+        assert(after.allocCount >= before.allocCount + 1);
+        assert(after.freeCount >= before.freeCount + 1);
+        assert(after.liveAllocs == before.liveAllocs);
+    }
+#endif
 
     std::cout << "newElement exception safety test passed!" << std::endl;
 }
@@ -376,7 +389,9 @@ void testNoLeaksAfterMixedTraffic()
 {
     std::cout << "Running no-leak mixed traffic test..." << std::endl;
 
+#if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
+#endif
 
     {
         std::vector<std::pair<void*, size_t>> ptrs;
@@ -412,10 +427,12 @@ void testNoLeaksAfterMixedTraffic()
     assert(big != nullptr);
     MemoryPool::deallocate(big, 1024 * 1024);
 
+#if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
     assert(after.liveAllocs == before.liveAllocs);
     assert(after.cachedPageBytes <= 64ull * 1024 * 1024);
     assert(after.reservedBytes >= after.cachedPageBytes);
+#endif
 
     std::cout << "No-leak mixed traffic test passed!" << std::endl;
 }
@@ -424,11 +441,12 @@ void testDebugGuards()
 {
     std::cout << "Running debug guard test..." << std::endl;
 
-    if constexpr (!kDebugGuardsEnabled)
+#if !KAMA_MEMORY_POOL_DEBUG_GUARDS
     {
         std::cout << "Debug guards disabled, skipping." << std::endl;
         return;
     }
+#else
 
     const MemoryPoolStats before = MemoryPool::stats();
 
@@ -449,6 +467,7 @@ void testDebugGuards()
     assert(after.liveAllocs == before.liveAllocs);
 
     std::cout << "Debug guard test passed!" << std::endl;
+#endif
 }
 
 void testLargeSpanLifetime()
