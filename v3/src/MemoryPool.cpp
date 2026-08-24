@@ -18,6 +18,8 @@ std::atomic<std::uint64_t> g_sizedFreeCount{0};
 std::atomic<std::uint64_t> g_unsizedFreeCount{0};
 std::atomic<std::uint64_t> g_centralRefillCount{0};
 std::atomic<std::uint64_t> g_centralFlushCount{0};
+std::atomic<std::uint64_t> g_centralLockWaits{0};
+std::atomic<std::uint64_t> g_remoteFreeCount{0};
 }
 
 void recordAllocation(size_t size)
@@ -54,6 +56,20 @@ void recordCentralFlush(size_t count)
     if constexpr (!kStatsEnabled)
         return;
     g_centralFlushCount.fetch_add(count, std::memory_order_relaxed);
+}
+
+void recordCentralLockWait(std::uint64_t count)
+{
+    if constexpr (!kStatsEnabled)
+        return;
+    g_centralLockWaits.fetch_add(count, std::memory_order_relaxed);
+}
+
+void recordRemoteFree(std::uint64_t count)
+{
+    if constexpr (!kStatsEnabled)
+        return;
+    g_remoteFreeCount.fetch_add(count, std::memory_order_relaxed);
 }
 
 void* MemoryPool::allocate(std::size_t size)
@@ -104,6 +120,8 @@ MemoryPoolStats MemoryPool::stats()
     out.unsizedFreeCount = g_unsizedFreeCount.load(std::memory_order_relaxed);
     out.centralRefillCount = g_centralRefillCount.load(std::memory_order_relaxed);
     out.centralFlushCount = g_centralFlushCount.load(std::memory_order_relaxed);
+    out.centralLockWaits = g_centralLockWaits.load(std::memory_order_relaxed);
+    out.remoteFreeCount = g_remoteFreeCount.load(std::memory_order_relaxed);
     return out;
 }
 

@@ -1,0 +1,59 @@
+# Build trees
+build/
+**/build/
+cmake-build-*/
+out/
+install/
+
+# Local test / benchmark binaries
+**/unit_test
+**/unit_test_*
+**/perf_test
+**/perf_test_*
+**/perf_asan
+**/quick_bench
+**/quick_cross
+**/quick_8t
+**/hang_repro
+
+# Compiler / linker outputs
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# Debug symbol bundles
+*.dSYM/
+*.pdb
+*.ilk
+*.exp
+
+# Logs / scratch output
+*.log
+perf_out.txt
+**/perf_out.txt
+
+# Ad-hoc local scratch sources
+v3/quick_*.cpp
+v3/hang_repro.cpp
+
+# CMake / IDE
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.cache/
+.idea/
+*.user
+*.suo
+*.VC.db
+
+# OS junk
+.DS_Store
+Thumbs.db

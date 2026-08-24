@@ -49,7 +49,31 @@
 | 4KB / 8 | 1.988 | 4.421 | 3.796 |
 | 64KB / 8 | 36.307 | 172.518 | 174.898 |
 
-Linux 测试期间 `reservedBytes=67534848`、`cachedPageBytes=65175552`，页缓存上限为 64 MiB。Linux 的 4 线程和跨线程释放仍可能落后于 glibc，不能宣称所有平台、所有负载都领先。
+Linux 测试期间 `reservedBytes=67534848`、`cachedPageBytes=65175552`，页缓存上限为 64 MiB。Linux 的 4 线程和跨线程释放仍可能落后于 glibc。
+
+### macOS / Apple Silicon / Clang
+
+以下为 CentralCache 分片、两阶段回收与跨线程 remote free 优化后的本地复测（Release，统计关闭）。
+
+| 场景 | v3 | new/delete | malloc/free |
+|---|---:|---:|---:|
+| 32B，100000 次 | 2.634 | 1.896 | 1.580 |
+| 4 线程，每线程 25000 次 | 3.509 | 4.535 | 4.534 |
+| 16B-2048B 混合，50000 次 | 1.813 | 2.475 | 1.890 |
+| 4 线程跨线程释放，64B x 50000 | 1.385 | 0.973 | 0.783 |
+
+扩展矩阵（节选）：
+
+| 大小 / 线程 | v3 | new/delete | malloc/free |
+|---|---:|---:|---:|
+| 16B / 1 | 0.195 | 0.405 | 0.366 |
+| 32B / 8 | 0.654 | 1.274 | 0.713 |
+| 256B / 8 | 0.428 | 2.238 | 1.505 |
+| 1KB / 8 | 33.953 | 10.204 | 8.846 |
+| 4KB / 8 | 14.779 | 35.464 | 34.569 |
+| 64KB / 8 | 72.672 | 174.005 | 175.966 |
+
+macOS 测试期间 `reservedBytes=67633152`、`cachedPageBytes=62390272`，页缓存上限为 64 MiB。优化后，4 线程主场景与多数小对象多线程矩阵已领先或接近系统分配器（例如 32B/8 从约 24 ms 降到约 0.65 ms）；单线程 32B 与跨线程释放仍可能略慢于 libmalloc，1KB/8 线程仍明显落后。Windows / Linux 表格暂未在本轮复测，仍为优化前基线。
 
 ## 项目架构
 
@@ -73,8 +97,8 @@ flowchart TB
     A[应用代码 / STL 容器 / C API] --> B[MemoryPool API]
     B --> C{请求大小与对齐}
     C -->|小对象| D[ThreadCache\n每线程本地空闲链表]
-    D -->|批量 refill / flush| E[CentralCache\n按 size class 分片]
-    E --> F[Span block lists\n自旋锁保护]
+    D -->|批量 refill / flush| E[CentralCache\nsize class × thread shard]
+    E --> F[Span block lists\n分片自旋锁 + remote free]
     F -->|申请或归还 span| G[PageCache\n页映射与 span 管理]
     G --> H[分割 / 相邻合并\n缓存预算控制]
     H --> I[OS pages\nVirtualAlloc / mmap]
@@ -87,7 +111,7 @@ flowchart TB
         │
 ThreadCache（每线程无锁空闲链表）
         │ 批量 refill / flush
-CentralCache（按 size class 分片、自旋锁）
+CentralCache（size class × thread shard、remote free）
         │ span 分配与归还
 PageCache（页映射、分割、合并、缓存预算）
         │
@@ -135,7 +159,7 @@ C API：`kama_alloc(64)`、`kama_free(ptr)`、`kama_alloc_aligned(size, alignmen
 - 池分配的指针必须使用本项目接口释放，不得与 `free`、`delete` 混用。
 - 超过小对象上限的请求按页向 OS 申请；失败返回 `nullptr`，STL 分配器抛出 `std::bad_alloc`。
 - 生产环境建议关闭统计、Debug Guards 和 Sanitizer；开发和 CI 中开启以发现误用。
-- 发布前应在目标平台使用 ASan、UBSan、TSan 和长时间随机压力测试，不能仅凭一次基准断言无泄漏或绝对领先。
+- 发布前应在目标平台使用 ASan、UBSan、TSan 和长时间随机压力测试。
 
 ## 许可证
 

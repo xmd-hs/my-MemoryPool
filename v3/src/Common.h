@@ -41,20 +41,28 @@ inline void cpuPause() { asm volatile("yield"); }
 inline void cpuPause() { std::this_thread::yield(); }
 #endif
 
+void recordCentralLockWait(std::uint64_t count);
+
 class SpinLock
 {
 public:
     explicit SpinLock(std::atomic_flag& flag) : flag_(flag)
     {
         int spins = 0;
+#if defined(__APPLE__)
+        constexpr int kYieldThreshold = 256;
+#else
+        constexpr int kYieldThreshold = 1024;
+#endif
         while (flag_.test_and_set(std::memory_order_acquire))
         {
+            ++spins;
             cpuPause();
-            // Central critical sections are short; on Linux a premature
-            // scheduler yield costs more than a few additional pauses.
-            if (++spins >= 1024)
+            if (spins >= kYieldThreshold)
                 std::this_thread::yield();
         }
+        if (spins > 0)
+            recordCentralLockWait(1);
     }
 
     ~SpinLock()
@@ -168,5 +176,6 @@ void recordAllocation(size_t size);
 void recordFree(bool sized);
 void recordCentralRefill(size_t count);
 void recordCentralFlush(size_t count);
+void recordRemoteFree(std::uint64_t count);
 
 } // namespace Kama_memoryPool

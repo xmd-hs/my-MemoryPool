@@ -10,6 +10,8 @@ namespace Kama_memoryPool
 namespace
 {
 
+thread_local std::array<size_t, FREE_LIST_SIZE> g_localAllocBalance{};
+
 size_t debugBlockIndex(const Span* span, const void* ptr)
 {
     const auto* start = static_cast<const char*>(span->pageAddr);
@@ -101,12 +103,21 @@ size_t ThreadCache::maxCachedBlocks(size_t size) const
 {
     constexpr size_t kBaseCacheBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kBaseCacheBytes / std::max(size, ALIGNMENT));
+#if defined(__APPLE__)
+    if (size <= 32) return 2048;
+    if (size <= 64) return 1024;
+    if (size <= 256) return 512;
+    if (size <= 1024) return 128;
+    if (size <= 4096) return 256;
+    return std::min(n, size_t(64));
+#else
     if (size <= 32) return 4096;
     if (size <= 64) return 2048;
     if (size <= 256) return 1024;
     if (size <= 1024) return 256;
     if (size <= 4096) return 512;
     return std::min(n, size_t(128));
+#endif
 }
 
 bool ThreadCache::shouldReturnToCentralCache(size_t index) const
@@ -118,11 +129,19 @@ size_t ThreadCache::getBatchNum(size_t size) const
 {
     constexpr size_t kMaxBatchBytes = 64 * 1024;
     size_t n = std::max(size_t(1), kMaxBatchBytes / std::max(size, ALIGNMENT));
+#if defined(__APPLE__)
+    if (size <= 32) n = std::min(n, size_t(256));
+    else if (size <= 64) n = std::min(n, size_t(128));
+    else if (size <= 256) n = std::min(n, size_t(64));
+    else if (size <= 1024) n = std::min(n, size_t(24));
+    else n = std::min(n, size_t(12));
+#else
     if (size <= 32) n = std::min(n, size_t(512));
     else if (size <= 64) n = std::min(n, size_t(256));
     else if (size <= 256) n = std::min(n, size_t(128));
     else if (size <= 1024) n = std::min(n, size_t(32));
     else n = std::min(n, size_t(16));
+#endif
     return std::max(size_t(1), n);
 }
 
@@ -155,6 +174,7 @@ void* ThreadCache::allocate(size_t size)
     {
         freeListSize_[index]--;
         freeList_[index] = *reinterpret_cast<void**>(ptr);
+        ++g_localAllocBalance[index];
         if constexpr (kDebugGuardsEnabled)
         {
             Span* span = PageCache::getInstance().findSpan(ptr);
@@ -202,12 +222,19 @@ bool ThreadCache::deallocate(void* ptr)
     if (index >= FREE_LIST_SIZE)
         return false;
 
-    *reinterpret_cast<void**>(ptr) = freeList_[index];
-    freeList_[index] = ptr;
-    freeListSize_[index]++;
+    if (g_localAllocBalance[index] > 0)
+    {
+        --g_localAllocBalance[index];
+        *reinterpret_cast<void**>(ptr) = freeList_[index];
+        freeList_[index] = ptr;
+        freeListSize_[index]++;
 
-    if (shouldReturnToCentralCache(index))
-        returnToCentralCache(index);
+        if (shouldReturnToCentralCache(index))
+            returnToCentralCache(index);
+        return true;
+    }
+
+    CentralCache::getInstance().pushRemoteFree(ptr, index);
     return true;
 }
 
@@ -249,12 +276,19 @@ bool ThreadCache::deallocate(void* ptr, size_t size)
             return false;
     }
 
-    *reinterpret_cast<void**>(ptr) = freeList_[index];
-    freeList_[index] = ptr;
-    freeListSize_[index]++;
+    if (g_localAllocBalance[index] > 0)
+    {
+        --g_localAllocBalance[index];
+        *reinterpret_cast<void**>(ptr) = freeList_[index];
+        freeList_[index] = ptr;
+        freeListSize_[index]++;
 
-    if (shouldReturnToCentralCache(index))
-        returnToCentralCache(index);
+        if (shouldReturnToCentralCache(index))
+            returnToCentralCache(index);
+        return true;
+    }
+
+    CentralCache::getInstance().pushRemoteFree(ptr, index);
     return true;
 }
 
@@ -278,6 +312,7 @@ void* ThreadCache::fetchFromCentralCache(size_t index)
         if (!debugMarkAllocated(span, result))
             return nullptr;
     }
+    ++g_localAllocBalance[index];
     return result;
 }
 

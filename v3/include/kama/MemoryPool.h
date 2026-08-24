@@ -24,6 +24,8 @@ struct MemoryPoolStats
     std::uint64_t unsizedFreeCount{0};
     std::uint64_t centralRefillCount{0};
     std::uint64_t centralFlushCount{0};
+    std::uint64_t centralLockWaits{0};
+    std::uint64_t remoteFreeCount{0};
     std::uint64_t reservedBytes{0};
     std::uint64_t cachedPageBytes{0};
 };

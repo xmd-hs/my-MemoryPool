@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <atomic>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -29,6 +30,9 @@ struct Span
     Span* next = nullptr;
     bool  inFreeList = false;
     bool  isLarge = false;
+    // Index into CentralCache::shards_ while this span sits on a partial list;
+    // SIZE_MAX means the span is currently not linked to any central shard.
+    std::atomic<size_t> centralShard{static_cast<size_t>(-1)};
 
     std::vector<std::uint8_t> debugAllocMap;
     bool debugLargeAllocated = false;
