@@ -50,6 +50,7 @@ cmake_install.cmake
 compile_commands.json
 .cache/
 .idea/
+.vscode/
 *.user
 *.suo
 *.VC.db
