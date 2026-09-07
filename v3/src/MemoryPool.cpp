@@ -74,7 +74,8 @@ void recordRemoteFree(std::uint64_t count)
 
 void* MemoryPool::allocate(std::size_t size)
 {
-    void* ptr = ThreadCache::getInstance()->allocate(size);
+    ThreadCache* cache = ThreadCache::getInstance();
+    void* ptr = cache->allocate(size);
     if (ptr)
         recordAllocation(size);
     return ptr;
@@ -82,7 +83,8 @@ void* MemoryPool::allocate(std::size_t size)
 
 void* MemoryPool::allocateAligned(std::size_t size, std::size_t alignment)
 {
-    void* ptr = ThreadCache::getInstance()->allocateAligned(size, alignment);
+    ThreadCache* cache = ThreadCache::getInstance();
+    void* ptr = cache->allocateAligned(size, alignment);
     if (ptr)
         recordAllocation(size);
     return ptr;

@@ -22,6 +22,19 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
+# Release LTO/LTCG so MemoryPool::allocate can inline into perf_test / user TUs.
+# Skip when sanitizers are on — ASan+LTO is fragile and not a perf configuration.
+if(NOT KAMA_MEMORY_POOL_ENABLE_ASAN AND NOT KAMA_MEMORY_POOL_ENABLE_UBSAN AND NOT KAMA_MEMORY_POOL_ENABLE_TSAN)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT KAMA_IPO_SUPPORTED OUTPUT KAMA_IPO_ERROR)
+    if(KAMA_IPO_SUPPORTED)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        message(STATUS "Release IPO/LTO enabled")
+    else()
+        message(STATUS "Release IPO/LTO not enabled: ${KAMA_IPO_ERROR}")
+    endif()
+endif()
+
 find_package(Threads REQUIRED)
 
 if(KAMA_MEMORY_POOL_ENABLE_TSAN AND (KAMA_MEMORY_POOL_ENABLE_ASAN OR KAMA_MEMORY_POOL_ENABLE_UBSAN))
@@ -94,6 +107,9 @@ set_target_properties(kama_memory_pool PROPERTIES
     SOVERSION ${PROJECT_VERSION_MAJOR}
     EXPORT_NAME memory_pool
 )
+if(KAMA_IPO_SUPPORTED)
+    set_property(TARGET kama_memory_pool PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
 
 if(KAMA_MEMORY_POOL_BUILD_TESTS)
     enable_testing()
@@ -101,6 +117,10 @@ if(KAMA_MEMORY_POOL_BUILD_TESTS)
     add_executable(perf_test tests/PerformanceTest.cpp)
     target_link_libraries(unit_test PRIVATE kama_memory_pool)
     target_link_libraries(perf_test PRIVATE kama_memory_pool)
+    if(KAMA_IPO_SUPPORTED)
+        set_property(TARGET unit_test PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET perf_test PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     target_include_directories(unit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     if(KAMA_SANITIZER_FLAGS)
         target_compile_options(unit_test PRIVATE ${KAMA_SANITIZER_FLAGS})

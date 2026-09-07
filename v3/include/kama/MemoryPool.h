@@ -11,7 +11,9 @@ namespace Kama_memoryPool
 {
 
 constexpr std::size_t kAlignment = 8;
-constexpr std::size_t kMaxBytes = 256 * 1024;
+// Size-class path covers medium buffers (e.g. ~400KiB vector growth). Exact
+// kMaxBytes and above use the large-span TLS recycle path.
+constexpr std::size_t kMaxBytes = 512 * 1024;
 
 struct MemoryPoolStats
 {

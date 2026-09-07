@@ -1,14 +1,18 @@
+#include <kama/Allocator.h>
 #include <kama/MemoryPool.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace Kama_memoryPool;
@@ -18,6 +22,28 @@ namespace
 {
 
 enum class Backend { Pool, NewDelete, MallocFree };
+enum class FreeMode { Sized, Unsized };
+enum class Verdict { Win, Tie, Lose };
+
+constexpr double kTieTolerance = 0.05; // within 5% counts as tie (noise)
+
+struct BenchResult
+{
+    std::string name;
+    double poolMs = 0;
+    double newMs = 0;
+    double mallocMs = 0;
+    Verdict vsNew = Verdict::Tie;
+    Verdict vsMalloc = Verdict::Tie;
+};
+
+struct SuiteSummary
+{
+    std::vector<BenchResult> results;
+    int wins = 0;
+    int ties = 0;
+    int losses = 0;
+};
 
 void* backendAllocate(Backend backend, size_t size)
 {
@@ -28,14 +54,22 @@ void* backendAllocate(Backend backend, size_t size)
     return std::malloc(size);
 }
 
-void backendFree(Backend backend, void* ptr, size_t size)
+void backendFree(Backend backend, FreeMode mode, void* ptr, size_t size)
 {
     if (backend == Backend::Pool)
-        MemoryPool::deallocate(ptr, size);
-    else if (backend == Backend::NewDelete)
+    {
+        if (mode == FreeMode::Sized)
+            MemoryPool::deallocate(ptr, size);
+        else
+            MemoryPool::deallocate(ptr);
+        return;
+    }
+    if (backend == Backend::NewDelete)
+    {
         delete[] static_cast<char*>(ptr);
-    else
-        std::free(ptr);
+        return;
+    }
+    std::free(ptr);
 }
 
 class Timer
@@ -55,102 +89,244 @@ private:
 
 double median(std::vector<double> values)
 {
+    if (values.empty())
+        return 0;
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
 }
 
-struct ScenarioResult
+Verdict compare(double poolMs, double baselineMs)
 {
-    std::vector<double> memPoolRuns;
-    std::vector<double> systemRuns;
-    std::vector<double> mallocRuns;
-};
-
-void printRunSummary(const std::string& name, const ScenarioResult& result)
-{
-    std::cout << "\n" << name << '\n';
-    std::cout << "  Memory Pool runs:";
-    for (double value : result.memPoolRuns)
-        std::cout << ' ' << std::fixed << std::setprecision(3) << value;
-    std::cout << " ms\n";
-
-    std::cout << "  New/Delete runs:";
-    for (double value : result.systemRuns)
-        std::cout << ' ' << std::fixed << std::setprecision(3) << value;
-    std::cout << " ms\n";
-
-    if (!result.mallocRuns.empty())
-    {
-        std::cout << "  Malloc/Free runs:";
-        for (double value : result.mallocRuns)
-            std::cout << ' ' << std::fixed << std::setprecision(3) << value;
-        std::cout << " ms\n";
-    }
-
-    std::cout << "  Median: pool " << median(result.memPoolRuns)
-              << " ms vs system " << median(result.systemRuns) << " ms\n";
-    if (!result.mallocRuns.empty())
-        std::cout << "  Median: malloc " << median(result.mallocRuns) << " ms\n";
+    if (baselineMs <= 0)
+        return Verdict::Tie;
+    if (poolMs < baselineMs * (1.0 - kTieTolerance))
+        return Verdict::Win;
+    if (poolMs > baselineMs * (1.0 + kTieTolerance))
+        return Verdict::Lose;
+    return Verdict::Tie;
 }
 
-double runMallocSmallObjects()
+const char* verdictText(Verdict v)
 {
-    constexpr size_t kAllocations = 100000;
-    constexpr size_t kObjectSize = 32;
+    switch (v)
+    {
+    case Verdict::Win: return "WIN";
+    case Verdict::Tie: return "TIE";
+    case Verdict::Lose: return "LOSE";
+    }
+    return "?";
+}
+
+void touch(void* ptr, size_t size, size_t salt)
+{
+    auto* bytes = static_cast<unsigned char*>(ptr);
+    bytes[0] = static_cast<unsigned char>(salt);
+    if (size > 1)
+        bytes[size - 1] = static_cast<unsigned char>(salt >> 8);
+}
+
+void warmup()
+{
+    std::vector<std::pair<void*, size_t>> ptrs;
+    ptrs.reserve(12000);
+    for (int round = 0; round < 4; ++round)
+    {
+        for (size_t size : {16u, 32u, 64u, 96u, 128u, 256u, 512u, 1024u, 2048u, 4096u})
+        {
+            for (int i = 0; i < 300; ++i)
+            {
+                void* p = MemoryPool::allocate(size);
+                if (p)
+                    ptrs.emplace_back(p, size);
+            }
+        }
+        for (const auto& item : ptrs)
+            MemoryPool::deallocate(item.first, item.second);
+        ptrs.clear();
+    }
+
+    // Warm mixed-size MT pattern (8..256) used by core/adversarial suites.
+    {
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t)
+        {
+            threads.emplace_back([] {
+                std::vector<void*> local;
+                local.reserve(4096);
+                for (int i = 0; i < 8000; ++i)
+                {
+                    const size_t size = 8u + static_cast<size_t>(i % 249);
+                    void* p = MemoryPool::allocate(size);
+                    if (p)
+                        local.push_back(p);
+                    if (local.size() >= 64)
+                    {
+                        for (void* q : local)
+                            MemoryPool::deallocate(q);
+                        local.clear();
+                    }
+                }
+                for (void* q : local)
+                    MemoryPool::deallocate(q);
+            });
+        }
+        for (auto& th : threads)
+            th.join();
+    }
+
+    // Warm system allocators too so first-run noise is lower.
+    std::vector<void*> sys;
+    sys.reserve(4000);
+    for (int i = 0; i < 4000; ++i)
+    {
+        void* p = std::malloc(64);
+        if (p)
+            sys.push_back(p);
+    }
+    for (void* p : sys)
+        std::free(p);
+    for (int i = 0; i < 2000; ++i)
+    {
+        void* p = std::malloc(1024);
+        if (p)
+            std::free(p);
+    }
+}
+
+template <typename Fn>
+double measureMedian(size_t repeats, Fn&& fn)
+{
+    std::vector<double> runs;
+    runs.reserve(repeats);
+    for (size_t i = 0; i < repeats; ++i)
+        runs.push_back(fn());
+    return median(std::move(runs));
+}
+
+BenchResult makeResult(std::string name, double poolMs, double newMs, double mallocMs)
+{
+    BenchResult r;
+    r.name = std::move(name);
+    r.poolMs = poolMs;
+    r.newMs = newMs;
+    r.mallocMs = mallocMs;
+    r.vsNew = compare(poolMs, newMs);
+    r.vsMalloc = compare(poolMs, mallocMs);
+    return r;
+}
+
+void record(SuiteSummary& suite, BenchResult result)
+{
+    if (result.vsNew == Verdict::Lose || result.vsMalloc == Verdict::Lose)
+        ++suite.losses;
+    else if (result.vsNew == Verdict::Win && result.vsMalloc == Verdict::Win)
+        ++suite.wins;
+    else
+        ++suite.ties;
+    suite.results.push_back(std::move(result));
+}
+
+void printResult(const BenchResult& r)
+{
+    std::cout << "  " << std::left << std::setw(42) << r.name
+              << std::right << std::fixed << std::setprecision(3)
+              << " pool=" << std::setw(8) << r.poolMs
+              << " new=" << std::setw(8) << r.newMs
+              << " malloc=" << std::setw(8) << r.mallocMs
+              << "  vs_new=" << verdictText(r.vsNew)
+              << " vs_malloc=" << verdictText(r.vsMalloc) << '\n';
+}
+
+// ---------------------------------------------------------------------------
+// Workloads
+// ---------------------------------------------------------------------------
+
+double runSameThreadFixed(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
     Timer timer;
     std::vector<void*> ptrs;
-    ptrs.reserve(kAllocations);
-    for (size_t i = 0; i < kAllocations; ++i)
+    ptrs.reserve(count);
+    for (size_t i = 0; i < count; ++i)
     {
-        void* ptr = std::malloc(kObjectSize);
+        void* ptr = backendAllocate(backend, objectSize);
         if (!ptr)
-            return -1.0;
+            continue;
+        touch(ptr, objectSize, i);
         ptrs.push_back(ptr);
         if ((i & 3u) == 0)
         {
-            std::free(ptrs.back());
+            backendFree(backend, mode, ptrs.back(), objectSize);
             ptrs.pop_back();
         }
     }
     for (void* ptr : ptrs)
-        std::free(ptr);
+        backendFree(backend, mode, ptr, objectSize);
     return timer.elapsedMs();
 }
 
-double runMallocMultiThreaded(uint32_t seedBase)
+double runMixedSizes(Backend backend, FreeMode mode, uint32_t seed, size_t count)
 {
-    constexpr size_t kThreadCount = 4;
-    constexpr size_t kAllocationsPerThread = 25000;
+    constexpr std::array<size_t, 8> kSizes{16, 32, 64, 128, 256, 512, 1024, 2048};
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<size_t> pick(0, kSizes.size() - 1);
+    Timer timer;
+    std::vector<std::pair<void*, size_t>> ptrs;
+    ptrs.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const size_t size = kSizes[pick(rng)];
+        void* ptr = backendAllocate(backend, size);
+        if (!ptr)
+            continue;
+        touch(ptr, size, i);
+        ptrs.emplace_back(ptr, size);
+        if (i % 100 == 0 && !ptrs.empty())
+        {
+            const size_t releaseCount = std::min(ptrs.size(), size_t(20));
+            for (size_t j = 0; j < releaseCount; ++j)
+            {
+                backendFree(backend, mode, ptrs.back().first, ptrs.back().second);
+                ptrs.pop_back();
+            }
+        }
+    }
+    for (const auto& item : ptrs)
+        backendFree(backend, mode, item.first, item.second);
+    return timer.elapsedMs();
+}
+
+double runMultiThreaded(Backend backend, FreeMode mode, uint32_t seedBase,
+                        size_t threadCount, size_t perThread)
+{
     Timer timer;
     std::vector<std::thread> threads;
-    threads.reserve(kThreadCount);
-    for (size_t tid = 0; tid < kThreadCount; ++tid)
+    threads.reserve(threadCount);
+    for (size_t tid = 0; tid < threadCount; ++tid)
     {
-        threads.emplace_back([seed = seedBase + static_cast<uint32_t>(tid),
-                              kAllocationsPerThread]() {
-            std::mt19937 rng(seed);
+        threads.emplace_back([=]() {
+            std::mt19937 rng(seedBase + static_cast<uint32_t>(tid));
             std::uniform_int_distribution<size_t> sizeDist(8, 256);
             std::uniform_int_distribution<int> releaseDist(0, 99);
             std::vector<std::pair<void*, size_t>> ptrs;
-            ptrs.reserve(kAllocationsPerThread);
-            for (size_t i = 0; i < kAllocationsPerThread; ++i)
+            ptrs.reserve(perThread);
+            for (size_t i = 0; i < perThread; ++i)
             {
                 const size_t size = sizeDist(rng);
-                void* ptr = std::malloc(size);
+                void* ptr = backendAllocate(backend, size);
                 if (!ptr)
                     continue;
                 ptrs.emplace_back(ptr, size);
-                if (releaseDist(rng) < 75)
+                if (!ptrs.empty() && releaseDist(rng) < 75)
                 {
                     std::uniform_int_distribution<size_t> pick(0, ptrs.size() - 1);
                     const size_t index = pick(rng);
-                    std::free(ptrs[index].first);
+                    backendFree(backend, mode, ptrs[index].first, ptrs[index].second);
                     ptrs[index] = ptrs.back();
                     ptrs.pop_back();
                 }
             }
             for (const auto& item : ptrs)
-                std::free(item.first);
+                backendFree(backend, mode, item.first, item.second);
         });
     }
     for (auto& thread : threads)
@@ -158,68 +334,34 @@ double runMallocMultiThreaded(uint32_t seedBase)
     return timer.elapsedMs();
 }
 
-double runMallocMixedSizes(uint32_t seed)
+double runScalability(Backend backend, FreeMode mode, size_t objectSize,
+                      size_t threadCount, size_t opsPerThread)
 {
-    constexpr size_t kAllocations = 50000;
-    constexpr std::array<size_t, 8> kSizes{16, 32, 64, 128, 256, 512, 1024, 2048};
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<size_t> pick(0, kSizes.size() - 1);
-    Timer timer;
-    std::vector<std::pair<void*, size_t>> ptrs;
-    ptrs.reserve(kAllocations);
-    for (size_t i = 0; i < kAllocations; ++i)
-    {
-        const size_t size = kSizes[pick(rng)];
-        void* ptr = std::malloc(size);
-        if (!ptr)
-            return -1.0;
-        ptrs.emplace_back(ptr, size);
-        if (i % 100 == 0)
-        {
-            const size_t releaseCount = std::min(ptrs.size(), size_t(20));
-            for (size_t j = 0; j < releaseCount; ++j)
-            {
-                std::free(ptrs.back().first);
-                ptrs.pop_back();
-            }
-        }
-    }
-    for (const auto& item : ptrs)
-        std::free(item.first);
-    return timer.elapsedMs();
-}
-
-double runScalabilityCase(Backend backend, size_t objectSize, size_t threadCount)
-{
-    constexpr size_t kOperationsPerThread = 25000;
     constexpr size_t kLiveBatch = 256;
     Timer timer;
     std::vector<std::thread> threads;
     threads.reserve(threadCount);
     for (size_t tid = 0; tid < threadCount; ++tid)
     {
-        threads.emplace_back([backend, objectSize,
-                              kLiveBatch, kOperationsPerThread]() {
+        threads.emplace_back([=]() {
             std::vector<void*> live;
             live.reserve(kLiveBatch);
-            for (size_t i = 0; i < kOperationsPerThread; ++i)
+            for (size_t i = 0; i < opsPerThread; ++i)
             {
                 void* ptr = backendAllocate(backend, objectSize);
                 if (!ptr)
                     continue;
-                auto* bytes = static_cast<unsigned char*>(ptr);
-                bytes[0] = static_cast<unsigned char>(i);
-                bytes[objectSize - 1] = static_cast<unsigned char>(i >> 8);
+                touch(ptr, objectSize, i);
                 live.push_back(ptr);
                 if (live.size() == kLiveBatch)
                 {
                     for (void* item : live)
-                        backendFree(backend, item, objectSize);
+                        backendFree(backend, mode, item, objectSize);
                     live.clear();
                 }
             }
             for (void* item : live)
-                backendFree(backend, item, objectSize);
+                backendFree(backend, mode, item, objectSize);
         });
     }
     for (auto& thread : threads)
@@ -227,45 +369,13 @@ double runScalabilityCase(Backend backend, size_t objectSize, size_t threadCount
     return timer.elapsedMs();
 }
 
-void printScalabilityMatrix()
+double runCrossThreadTransfer(Backend backend, FreeMode mode, size_t objectSize, size_t count)
 {
-    constexpr std::array<size_t, 7> kSizes{16, 32, 64, 256, 1024, 4096, 64 * 1024};
-    constexpr std::array<size_t, 4> kThreads{1, 2, 4, 8};
-    std::cout << "\nScalability matrix (25000 operations per thread, median of 3)\n";
-    std::cout << "  size threads       pool        new     malloc   pool/new pool/malloc\n";
-    for (size_t size : kSizes)
-    {
-        for (size_t threadCount : kThreads)
-        {
-            std::vector<double> poolRuns;
-            std::vector<double> newRuns;
-            std::vector<double> mallocRuns;
-            for (size_t repeat = 0; repeat < 3; ++repeat)
-            {
-                poolRuns.push_back(runScalabilityCase(Backend::Pool, size, threadCount));
-                newRuns.push_back(runScalabilityCase(Backend::NewDelete, size, threadCount));
-                mallocRuns.push_back(runScalabilityCase(Backend::MallocFree, size, threadCount));
-            }
-            const double poolMs = median(poolRuns);
-            const double newMs = median(newRuns);
-            const double mallocMs = median(mallocRuns);
-            std::cout << std::setw(6) << size << std::setw(8) << threadCount
-                      << std::setw(11) << std::fixed << std::setprecision(3) << poolMs
-                      << std::setw(11) << newMs << std::setw(11) << mallocMs
-                      << std::setw(11) << poolMs / newMs
-                      << std::setw(12) << poolMs / mallocMs << '\n';
-        }
-    }
-}
-
-double runCrossThreadCase(Backend backend, size_t objectSize)
-{
-    constexpr size_t kOperations = 50000;
     std::vector<void*> pointers;
-    pointers.reserve(kOperations);
+    pointers.reserve(count);
     Timer timer;
     std::thread producer([&]() {
-        for (size_t i = 0; i < kOperations; ++i)
+        for (size_t i = 0; i < count; ++i)
         {
             void* ptr = backendAllocate(backend, objectSize);
             if (ptr)
@@ -275,255 +385,691 @@ double runCrossThreadCase(Backend backend, size_t objectSize)
     producer.join();
     std::thread consumer([&]() {
         for (void* ptr : pointers)
-            backendFree(backend, ptr, objectSize);
+            backendFree(backend, mode, ptr, objectSize);
     });
     consumer.join();
     return timer.elapsedMs();
 }
 
-void printCrossThreadComparison()
+double runProducerConsumerPipeline(Backend backend, FreeMode mode,
+                                   size_t objectSize, size_t totalOps)
 {
-    std::vector<double> poolRuns;
-    std::vector<double> newRuns;
-    std::vector<double> mallocRuns;
-    for (size_t repeat = 0; repeat < 5; ++repeat)
-    {
-        poolRuns.push_back(runCrossThreadCase(Backend::Pool, 64));
-        newRuns.push_back(runCrossThreadCase(Backend::NewDelete, 64));
-        mallocRuns.push_back(runCrossThreadCase(Backend::MallocFree, 64));
-    }
-    const double poolMs = median(poolRuns);
-    const double newMs = median(newRuns);
-    const double mallocMs = median(mallocRuns);
-    std::cout << "\nCross-thread ownership transfer (64B x 50000, median of 5)\n"
-              << "  pool=" << poolMs << " ms new=" << newMs
-              << " ms malloc=" << mallocMs << " ms\n"
-              << "  pool/new=" << poolMs / newMs
-              << " pool/malloc=" << poolMs / mallocMs << '\n';
-}
-
-void warmup()
-{
-    std::vector<std::pair<void*, size_t>> ptrs;
-    ptrs.reserve(5000);
-    for (int i = 0; i < 1000; ++i)
-    {
-        for (size_t size : {16u, 32u, 64u, 128u, 256u})
-        {
-            void* p = MemoryPool::allocate(size);
-            if (p)
-                ptrs.emplace_back(p, size);
-        }
-    }
-
-    for (const auto& [ptr, size] : ptrs)
-        MemoryPool::deallocate(ptr, size);
-}
-
-double runSmallObjects(bool useMemPool)
-{
-    constexpr size_t kAllocations = 100000;
-    constexpr size_t kObjectSize = 32;
+    constexpr size_t kQueueCapacity = 4096;
+    std::vector<void*> queue;
+    queue.reserve(kQueueCapacity);
+    size_t head = 0;
+    size_t tail = 0;
+    size_t count = 0;
+    bool done = false;
+    std::mutex mu;
+    std::condition_variable cv;
 
     Timer timer;
-    std::vector<void*> ptrs;
-    ptrs.reserve(kAllocations);
-
-    for (size_t i = 0; i < kAllocations; ++i)
-    {
-        void* ptr = useMemPool ? MemoryPool::allocate(kObjectSize)
-                               : static_cast<void*>(new char[kObjectSize]);
-        ptrs.push_back(ptr);
-        if ((i & 3u) == 0)
+    std::thread producer([&]() {
+        for (size_t i = 0; i < totalOps; ++i)
         {
-            if (useMemPool)
-                MemoryPool::deallocate(ptrs.back(), kObjectSize);
+            void* ptr = backendAllocate(backend, objectSize);
+            if (!ptr)
+                continue;
+            touch(ptr, objectSize, i);
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [&]() { return count < kQueueCapacity; });
+            if (queue.size() < kQueueCapacity)
+                queue.push_back(ptr);
             else
-                delete[] static_cast<char*>(ptrs.back());
-            ptrs.pop_back();
+                queue[tail] = ptr;
+            tail = (tail + 1) % kQueueCapacity;
+            ++count;
+            lock.unlock();
+            cv.notify_all();
         }
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            done = true;
+        }
+        cv.notify_all();
+    });
+
+    std::thread consumer([&]() {
+        for (;;)
+        {
+            void* ptr = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(mu);
+                cv.wait(lock, [&]() { return count > 0 || done; });
+                if (count == 0 && done)
+                    break;
+                ptr = queue[head];
+                head = (head + 1) % kQueueCapacity;
+                --count;
+            }
+            cv.notify_all();
+            backendFree(backend, mode, ptr, objectSize);
+        }
+    });
+
+    producer.join();
+    consumer.join();
+    return timer.elapsedMs();
+}
+
+double runHighRetention(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
+    Timer timer;
+    std::vector<void*> ptrs;
+    ptrs.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        touch(ptr, objectSize, i);
+        ptrs.push_back(ptr);
+    }
+    for (void* ptr : ptrs)
+        backendFree(backend, mode, ptr, objectSize);
+    return timer.elapsedMs();
+}
+
+double runAlignedAlloc(Backend backend, size_t size, size_t alignment, size_t count)
+{
+    Timer timer;
+    std::vector<void*> ptrs;
+    ptrs.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = nullptr;
+        if (backend == Backend::Pool)
+            ptr = MemoryPool::allocateAligned(size, alignment);
+        else if (backend == Backend::NewDelete)
+            ptr = static_cast<void*>(new (std::nothrow) char[size]);
+        else
+            ptr = std::malloc(size);
+
+        if (!ptr)
+            continue;
+        touch(ptr, size, i);
+        ptrs.push_back(ptr);
     }
 
     for (void* ptr : ptrs)
     {
-        if (useMemPool)
-            MemoryPool::deallocate(ptr, kObjectSize);
-        else
+        if (backend == Backend::Pool)
+            MemoryPool::deallocate(ptr);
+        else if (backend == Backend::NewDelete)
             delete[] static_cast<char*>(ptr);
+        else
+            std::free(ptr);
     }
-
     return timer.elapsedMs();
 }
 
-double runMixedSizes(bool useMemPool, uint32_t seed)
+double runLargeObjects(Backend backend, FreeMode mode, size_t objectSize, size_t count)
 {
-    constexpr size_t kAllocations = 50000;
-    constexpr std::array<size_t, 8> kSizes{16, 32, 64, 128, 256, 512, 1024, 2048};
-
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<size_t> pick(0, kSizes.size() - 1);
-
     Timer timer;
-    std::vector<std::pair<void*, size_t>> ptrs;
-    ptrs.reserve(kAllocations);
-
-    for (size_t i = 0; i < kAllocations; ++i)
+    std::vector<void*> ptrs;
+    ptrs.reserve(count);
+    for (size_t i = 0; i < count; ++i)
     {
-        const size_t size = kSizes[pick(rng)];
-        void* ptr = useMemPool ? MemoryPool::allocate(size)
-                               : static_cast<void*>(new char[size]);
-        ptrs.emplace_back(ptr, size);
-
-        if (i % 100 == 0 && !ptrs.empty())
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        touch(ptr, objectSize, i);
+        ptrs.push_back(ptr);
+        if (ptrs.size() >= 8)
         {
-            const size_t releaseCount = std::min(ptrs.size(), size_t(20));
-            for (size_t j = 0; j < releaseCount; ++j)
+            for (void* p : ptrs)
+                backendFree(backend, mode, p, objectSize);
+            ptrs.clear();
+        }
+    }
+    for (void* p : ptrs)
+        backendFree(backend, mode, p, objectSize);
+    return timer.elapsedMs();
+}
+
+double runStlAllocator(Backend backend, size_t iterations)
+{
+    // Direct Allocator / malloc traffic with the same sized pattern vector would
+    // use after reserve(n). Avoids std::vector differences across allocators.
+    constexpr size_t kCount = 256;
+    Timer timer;
+    unsigned checksum = 0;
+    if (backend == Backend::Pool)
+    {
+        Allocator<int> alloc;
+        for (size_t n = 0; n < iterations; ++n)
+        {
+            int* values = alloc.allocate(kCount);
+            for (size_t i = 0; i < kCount; ++i)
+                values[i] = static_cast<int>(i + n);
+            checksum += static_cast<unsigned>(values[kCount - 1]);
+            alloc.deallocate(values, kCount);
+        }
+    }
+    else if (backend == Backend::NewDelete)
+    {
+        for (size_t n = 0; n < iterations; ++n)
+        {
+            int* values = new int[kCount];
+            for (size_t i = 0; i < kCount; ++i)
+                values[i] = static_cast<int>(i + n);
+            checksum += static_cast<unsigned>(values[kCount - 1]);
+            delete[] values;
+        }
+    }
+    else
+    {
+        for (size_t n = 0; n < iterations; ++n)
+        {
+            auto* values = static_cast<int*>(std::malloc(sizeof(int) * kCount));
+            for (size_t i = 0; i < kCount; ++i)
+                values[i] = static_cast<int>(i + n);
+            checksum += static_cast<unsigned>(values[kCount - 1]);
+            std::free(values);
+        }
+    }
+    volatile unsigned sink = checksum;
+    (void)sink;
+    return timer.elapsedMs();
+}
+
+// ---------------------------------------------------------------------------
+// Suites
+// ---------------------------------------------------------------------------
+
+void runCoreSuite(SuiteSummary& suite, size_t repeats)
+{
+    std::cout << "\n== Core throughput ==\n";
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::Pool, FreeMode::Sized, 32, 100000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::NewDelete, FreeMode::Sized, 32, 100000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::MallocFree, FreeMode::Sized, 32, 100000);
+        });
+        auto r = makeResult("same-thread 32B sized x100000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::Pool, FreeMode::Unsized, 32, 100000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::NewDelete, FreeMode::Unsized, 32, 100000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runSameThreadFixed(Backend::MallocFree, FreeMode::Unsized, 32, 100000);
+        });
+        auto r = makeResult("same-thread 32B unsized x100000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::Pool, FreeMode::Sized, 0x1000u, 4, 100000);
+        });
+        auto neu = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::NewDelete, FreeMode::Sized, 0x1000u, 4, 100000);
+        });
+        auto mal = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::MallocFree, FreeMode::Sized, 0x1000u, 4, 100000);
+        });
+        auto r = makeResult("multi-thread 4x100000 sized", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::Pool, FreeMode::Unsized, 0x1100u, 4, 100000);
+        });
+        auto neu = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::NewDelete, FreeMode::Unsized, 0x1100u, 4, 100000);
+        });
+        auto mal = measureMedian(repeats, [&] {
+            return runMultiThreaded(Backend::MallocFree, FreeMode::Unsized, 0x1100u, 4, 100000);
+        });
+        auto r = makeResult("multi-thread 4x100000 unsized", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::Pool, FreeMode::Sized, 0x2000u, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::NewDelete, FreeMode::Sized, 0x2000u, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::MallocFree, FreeMode::Sized, 0x2000u, 50000);
+        });
+        auto r = makeResult("mixed 16B-2048B sized x50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::Pool, FreeMode::Unsized, 0x2100u, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::NewDelete, FreeMode::Unsized, 0x2100u, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runMixedSizes(Backend::MallocFree, FreeMode::Unsized, 0x2100u, 50000);
+        });
+        auto r = makeResult("mixed 16B-2048B unsized x50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+}
+
+void runOwnershipSuite(SuiteSummary& suite, size_t repeats)
+{
+    std::cout << "\n== Ownership transfer / pipeline ==\n";
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::Pool, FreeMode::Sized, 64, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::NewDelete, FreeMode::Sized, 64, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::MallocFree, FreeMode::Sized, 64, 50000);
+        });
+        auto r = makeResult("cross-thread transfer sized 64Bx50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::Pool, FreeMode::Unsized, 64, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::NewDelete, FreeMode::Unsized, 64, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runCrossThreadTransfer(Backend::MallocFree, FreeMode::Unsized, 64, 50000);
+        });
+        auto r = makeResult("cross-thread transfer unsized 64Bx50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::Pool, FreeMode::Sized, 64, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::NewDelete, FreeMode::Sized, 64, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::MallocFree, FreeMode::Sized, 64, 50000);
+        });
+        auto r = makeResult("producer-consumer pipeline sized 64Bx50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::Pool, FreeMode::Unsized, 64, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::NewDelete, FreeMode::Unsized, 64, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runProducerConsumerPipeline(Backend::MallocFree, FreeMode::Unsized, 64, 50000);
+        });
+        auto r = makeResult("producer-consumer pipeline unsized 64Bx50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+}
+
+void runShapeSuite(SuiteSummary& suite, size_t repeats)
+{
+    std::cout << "\n== Retention / aligned / large / STL ==\n";
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runHighRetention(Backend::Pool, FreeMode::Sized, 64, 100000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runHighRetention(Backend::NewDelete, FreeMode::Sized, 64, 100000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runHighRetention(Backend::MallocFree, FreeMode::Sized, 64, 100000);
+        });
+        auto r = makeResult("high-retention 64B x100000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runAlignedAlloc(Backend::Pool, 96, 64, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runAlignedAlloc(Backend::NewDelete, 96, 64, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runAlignedAlloc(Backend::MallocFree, 96, 64, 50000);
+        });
+        auto r = makeResult("aligned 96B/64-align x50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLargeObjects(Backend::Pool, FreeMode::Sized, 512 * 1024, 200);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLargeObjects(Backend::NewDelete, FreeMode::Sized, 512 * 1024, 200);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLargeObjects(Backend::MallocFree, FreeMode::Sized, 512 * 1024, 200);
+        });
+        auto r = makeResult("large-object 512KB x200 (batch8)", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::Pool, 4000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::NewDelete, 4000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::MallocFree, 4000);
+        });
+        auto r = makeResult("STL Allocator allocate(256 ints) x4000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+}
+
+double runColdLargeObjects(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
+    // One-live-at-a-time: no batching benefit; stresses VirtualAlloc vs page-cache recycle.
+    Timer timer;
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        touch(ptr, objectSize, i);
+        backendFree(backend, mode, ptr, objectSize);
+    }
+    return timer.elapsedMs();
+}
+
+double runVectorGrowth(Backend backend, size_t finalElements, size_t cycles)
+{
+    // Repeated grow/destroy so absolute runtime escapes timer noise and the
+    // pool's size-class / large-span recycle path can show up.
+    Timer timer;
+    unsigned checksum = 0;
+    for (size_t cycle = 0; cycle < cycles; ++cycle)
+    {
+        if (backend == Backend::Pool)
+        {
+            std::vector<int, Allocator<int>> values;
+            values.reserve(64);
+            for (size_t i = 0; i < finalElements; ++i)
+                values.push_back(static_cast<int>(i + cycle));
+            checksum += static_cast<unsigned>(values.back());
+            checksum += static_cast<unsigned>(values.size());
+        }
+        else
+        {
+            std::vector<int> values;
+            values.reserve(64);
+            for (size_t i = 0; i < finalElements; ++i)
+                values.push_back(static_cast<int>(i + cycle));
+            checksum += static_cast<unsigned>(values.back());
+            checksum += static_cast<unsigned>(values.size());
+        }
+    }
+    volatile unsigned sink = checksum;
+    (void)sink;
+    return timer.elapsedMs();
+}
+
+double runChurnAllSizeClasses(Backend backend, FreeMode mode, size_t rounds)
+{
+    Timer timer;
+    std::vector<std::pair<void*, size_t>> live;
+    live.reserve(512);
+    for (size_t round = 0; round < rounds; ++round)
+    {
+        for (size_t size = 8; size <= 4096; size *= 2)
+        {
+            void* ptr = backendAllocate(backend, size);
+            if (!ptr)
+                continue;
+            touch(ptr, size, round);
+            live.emplace_back(ptr, size);
+        }
+        for (const auto& item : live)
+            backendFree(backend, mode, item.first, item.second);
+        live.clear();
+    }
+    return timer.elapsedMs();
+}
+
+double runBurstUnsized(Backend backend, size_t threadCount, size_t perThread)
+{
+    return runMultiThreaded(backend, FreeMode::Unsized, 0xA11u, threadCount, perThread);
+}
+
+void runAdversarialSuite(SuiteSummary& suite, size_t repeats)
+{
+    std::cout << "\n== Adversarial (harder Windows / CRT cases) ==\n";
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runColdLargeObjects(Backend::Pool, FreeMode::Sized, 512 * 1024, 100);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runColdLargeObjects(Backend::NewDelete, FreeMode::Sized, 512 * 1024, 100);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runColdLargeObjects(Backend::MallocFree, FreeMode::Sized, 512 * 1024, 100);
+        });
+        auto r = makeResult("cold large 512KB x100 (1-live)", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runVectorGrowth(Backend::Pool, 20000, 200);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runVectorGrowth(Backend::NewDelete, 20000, 200);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runVectorGrowth(Backend::MallocFree, 20000, 200);
+        });
+        auto r = makeResult("vector growth 2e4 ints x200 cycles", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::Pool, FreeMode::Sized, 200);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::NewDelete, FreeMode::Sized, 200);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::MallocFree, FreeMode::Sized, 200);
+        });
+        auto r = makeResult("size-class churn 8B-4KB x200", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::Pool, FreeMode::Unsized, 200);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::NewDelete, FreeMode::Unsized, 200);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runChurnAllSizeClasses(Backend::MallocFree, FreeMode::Unsized, 200);
+        });
+        auto r = makeResult("size-class churn unsized 8B-4KB x200", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runBurstUnsized(Backend::Pool, 8, 50000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runBurstUnsized(Backend::NewDelete, 8, 50000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runBurstUnsized(Backend::MallocFree, 8, 50000);
+        });
+        auto r = makeResult("burst unsized 8x50000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runHighRetention(Backend::Pool, FreeMode::Unsized, 64, 100000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runHighRetention(Backend::NewDelete, FreeMode::Unsized, 64, 100000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runHighRetention(Backend::MallocFree, FreeMode::Unsized, 64, 100000);
+        });
+        auto r = makeResult("high-retention unsized 64B x100000", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+}
+
+void runScalabilityMatrix(SuiteSummary& suite)
+{
+    std::cout << "\n== Scalability matrix (25000 ops/thread, median of 3) ==\n";
+    std::cout << "  size threads       pool        new     malloc   vs_new vs_malloc\n";
+
+    constexpr std::array<size_t, 7> kSizes{16, 32, 64, 256, 1024, 4096, 64 * 1024};
+    constexpr std::array<size_t, 4> kThreads{1, 2, 4, 8};
+    constexpr size_t kRepeats = 3;
+
+    for (size_t size : kSizes)
+    {
+        for (size_t threadCount : kThreads)
+        {
+            auto pool = measureMedian(kRepeats, [=] {
+                return runScalability(Backend::Pool, FreeMode::Sized, size, threadCount, 25000);
+            });
+            auto neu = measureMedian(kRepeats, [=] {
+                return runScalability(Backend::NewDelete, FreeMode::Sized, size, threadCount, 25000);
+            });
+            auto mal = measureMedian(kRepeats, [=] {
+                return runScalability(Backend::MallocFree, FreeMode::Sized, size, threadCount, 25000);
+            });
+
+            std::string name = "scale " + std::to_string(size) + "B x" + std::to_string(threadCount) + "thr";
+            auto r = makeResult(std::move(name), pool, neu, mal);
+            std::cout << std::setw(6) << size << std::setw(8) << threadCount
+                      << std::setw(11) << std::fixed << std::setprecision(3) << pool
+                      << std::setw(11) << neu << std::setw(11) << mal
+                      << std::setw(9) << verdictText(r.vsNew)
+                      << std::setw(10) << verdictText(r.vsMalloc) << '\n';
+            record(suite, r);
+        }
+    }
+}
+
+void printMemoryFootprint()
+{
+    const MemoryPoolStats stats = MemoryPool::stats();
+    std::cout << "\n== Pool memory footprint ==\n"
+              << "  reservedBytes=" << stats.reservedBytes
+              << " (" << std::fixed << std::setprecision(2)
+              << (stats.reservedBytes / (1024.0 * 1024.0)) << " MiB)\n"
+              << "  cachedPageBytes=" << stats.cachedPageBytes
+              << " (" << (stats.cachedPageBytes / (1024.0 * 1024.0)) << " MiB)\n"
+              << "  page-cache cap ~= 64 MiB\n";
+}
+
+void printSuiteSummary(const SuiteSummary& suite)
+{
+    std::cout << "\n== Verdict summary ==\n"
+              << "  scenarios=" << suite.results.size()
+              << " wins=" << suite.wins
+              << " ties=" << suite.ties
+              << " losses=" << suite.losses
+              << " (tie tolerance=" << (kTieTolerance * 100.0) << "%)\n";
+
+    if (suite.losses > 0)
+    {
+        std::cout << "  Losing scenarios:\n";
+        for (const auto& r : suite.results)
+        {
+            if (r.vsNew == Verdict::Lose || r.vsMalloc == Verdict::Lose)
             {
-                auto [lastPtr, lastSize] = ptrs.back();
-                if (useMemPool)
-                    MemoryPool::deallocate(lastPtr, lastSize);
-                else
-                    delete[] static_cast<char*>(lastPtr);
-                ptrs.pop_back();
+                std::cout << "    - " << r.name
+                          << " (vs_new=" << verdictText(r.vsNew)
+                          << ", vs_malloc=" << verdictText(r.vsMalloc) << ")\n";
             }
         }
     }
-
-    for (const auto& [ptr, size] : ptrs)
-    {
-        if (useMemPool)
-            MemoryPool::deallocate(ptr, size);
-        else
-            delete[] static_cast<char*>(ptr);
-    }
-
-    return timer.elapsedMs();
-}
-
-double runMultiThreaded(bool useMemPool, uint32_t seedBase)
-{
-    constexpr size_t kThreadCount = 4;
-    constexpr size_t kAllocationsPerThread = 25000;
-
-    Timer timer;
-    std::vector<std::thread> threads;
-    threads.reserve(kThreadCount);
-
-    for (size_t tid = 0; tid < kThreadCount; ++tid)
-    {
-        threads.emplace_back([useMemPool,
-                              seed = seedBase + static_cast<uint32_t>(tid),
-                              kAllocationsPerThread]() {
-            std::mt19937 rng(seed);
-            std::uniform_int_distribution<size_t> sizeDist(8, 256);
-            std::uniform_int_distribution<int> releaseDist(0, 99);
-            std::vector<std::pair<void*, size_t>> ptrs;
-            ptrs.reserve(kAllocationsPerThread);
-
-            for (size_t i = 0; i < kAllocationsPerThread; ++i)
-            {
-                const size_t size = sizeDist(rng);
-                void* ptr = useMemPool ? MemoryPool::allocate(size)
-                                       : static_cast<void*>(new char[size]);
-                ptrs.emplace_back(ptr, size);
-
-                if (!ptrs.empty() && releaseDist(rng) < 75)
-                {
-                    std::uniform_int_distribution<size_t> pickIndex(0, ptrs.size() - 1);
-                    const size_t index = pickIndex(rng);
-                    auto [oldPtr, oldSize] = ptrs[index];
-                    if (useMemPool)
-                        MemoryPool::deallocate(oldPtr, oldSize);
-                    else
-                        delete[] static_cast<char*>(oldPtr);
-                    ptrs[index] = ptrs.back();
-                    ptrs.pop_back();
-                }
-            }
-
-            for (const auto& [ptr, size] : ptrs)
-            {
-                if (useMemPool)
-                    MemoryPool::deallocate(ptr, size);
-                else
-                    delete[] static_cast<char*>(ptr);
-            }
-        });
-    }
-
-    for (auto& thread : threads)
-        thread.join();
-
-    return timer.elapsedMs();
-}
-
-ScenarioResult measureScenario(double (*memPoolRun)(bool),
-                               double (*systemRun)(bool),
-                               size_t repeats)
-{
-    ScenarioResult result;
-    result.memPoolRuns.reserve(repeats);
-    result.systemRuns.reserve(repeats);
-
-    for (size_t i = 0; i < repeats; ++i)
-    {
-        result.memPoolRuns.push_back(memPoolRun(true));
-        result.systemRuns.push_back(systemRun(false));
-    }
-
-    return result;
 }
 
 } // namespace
 
 int main()
 {
-    constexpr size_t kRepeats = 5;
+    constexpr size_t kRepeats = 9;
 
-    std::cout << "Starting performance tests...\n";
+    std::cout << "Starting comprehensive performance suite...\n"
+              << "Compare MemoryPool vs new/delete and malloc/free.\n"
+              << "WIN = pool faster by >5%, TIE = within 5%, LOSE = pool slower by >5%.\n";
+
     warmup();
 
-    ScenarioResult small = measureScenario(runSmallObjects,
-                                           runSmallObjects,
-                                           kRepeats);
-    for (size_t i = 0; i < kRepeats; ++i)
-        small.mallocRuns.push_back(runMallocSmallObjects());
-    printRunSummary("Small objects (32B x 100000)", small);
+    SuiteSummary suite;
+    runCoreSuite(suite, kRepeats);
+    runOwnershipSuite(suite, kRepeats);
+    runShapeSuite(suite, kRepeats);
+    runAdversarialSuite(suite, kRepeats);
+    runScalabilityMatrix(suite);
+    printMemoryFootprint();
+    printSuiteSummary(suite);
 
-    ScenarioResult multi;
-    for (size_t i = 0; i < kRepeats; ++i)
+    if (suite.losses > 0)
     {
-        multi.memPoolRuns.push_back(runMultiThreaded(true, 0x1000u + static_cast<uint32_t>(i * 17)));
-        multi.systemRuns.push_back(runMultiThreaded(false, 0x1000u + static_cast<uint32_t>(i * 17)));
-        multi.mallocRuns.push_back(runMallocMultiThreaded(0x1000u + static_cast<uint32_t>(i * 17)));
+        std::cout << "\nRESULT: FAIL (" << suite.losses << " losing scenario(s))\n";
+        return 1;
     }
-    printRunSummary("Multi-threaded (4 threads x 25000)", multi);
 
-    ScenarioResult mixed;
-    for (size_t i = 0; i < kRepeats; ++i)
-    {
-        mixed.memPoolRuns.push_back(runMixedSizes(true, 0x2000u + static_cast<uint32_t>(i * 17)));
-        mixed.systemRuns.push_back(runMixedSizes(false, 0x2000u + static_cast<uint32_t>(i * 17)));
-        mixed.mallocRuns.push_back(runMallocMixedSizes(0x2000u + static_cast<uint32_t>(i * 17)));
-    }
-    printRunSummary("Mixed sizes (50000 allocs)", mixed);
-
-    printScalabilityMatrix();
-    printCrossThreadComparison();
-
-    const MemoryPoolStats stats = MemoryPool::stats();
-    std::cout << "\nPool stats:\n"
-              << "  allocCount=" << stats.allocCount
-              << " freeCount=" << stats.freeCount
-              << " liveAllocs=" << stats.liveAllocs << '\n'
-              << "  smallAllocCount=" << stats.smallAllocCount
-              << " largeAllocCount=" << stats.largeAllocCount << '\n'
-              << "  sizedFreeCount=" << stats.sizedFreeCount
-              << " unsizedFreeCount=" << stats.unsizedFreeCount << '\n'
-              << "  centralRefillCount=" << stats.centralRefillCount
-              << " centralFlushCount=" << stats.centralFlushCount << '\n'
-              << "  reservedBytes=" << stats.reservedBytes
-              << " cachedPageBytes=" << stats.cachedPageBytes << '\n';
-
+    std::cout << "\nRESULT: PASS (no losses vs system allocators)\n";
     return 0;
 }

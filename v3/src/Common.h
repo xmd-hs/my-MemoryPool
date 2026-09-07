@@ -29,7 +29,21 @@ constexpr bool kStatsEnabled = KAMA_MEMORY_POOL_STATS_ENABLED != 0;
 
 constexpr size_t ALIGNMENT = kAlignment;
 constexpr size_t MAX_BYTES = kMaxBytes;
-constexpr size_t kMaxSizeClasses = 64;
+constexpr size_t kMaxSizeClasses = 96;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define KAMA_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KAMA_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define KAMA_PREFETCH(p) __builtin_prefetch(static_cast<const void*>(p), 1, 3)
+#else
+#define KAMA_LIKELY(x) (x)
+#define KAMA_UNLIKELY(x) (x)
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#define KAMA_PREFETCH(p) _mm_prefetch(static_cast<const char*>(static_cast<const void*>(p)), _MM_HINT_T0)
+#else
+#define KAMA_PREFETCH(p) ((void)0)
+#endif
+#endif
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
 inline void cpuPause() { _mm_pause(); }
@@ -103,6 +117,9 @@ constexpr SizeClassTable makeSizeClassTable()
 constexpr SizeClassTable kSizeClassTable = makeSizeClassTable();
 constexpr size_t FREE_LIST_SIZE = kSizeClassTable.count;
 
+// Bytes reserved before the user pointer inside each size-class slot.
+constexpr size_t kBlockHeaderSize = 8;
+
 constexpr std::array<uint8_t, 257> makeSmallIndexMap()
 {
     std::array<uint8_t, 257> map{};
@@ -150,10 +167,19 @@ class SizeClass
 public:
     static constexpr size_t classCount() { return FREE_LIST_SIZE; }
 
+    // Usable bytes returned to the caller for this class.
     static constexpr size_t getSize(size_t index)
     {
         return kSizeClassTable.sizes[index];
     }
+
+    // Physical slot size equals usable size (no per-block header).
+    static constexpr size_t slotSize(size_t index)
+    {
+        return getSize(index);
+    }
+
+    static constexpr bool usesHeader(size_t) { return false; }
 
     static size_t roundUp(size_t bytes)
     {

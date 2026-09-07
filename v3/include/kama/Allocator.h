@@ -31,7 +31,10 @@ public:
             return nullptr;
         if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
             throw std::bad_array_new_length();
-        void* p = MemoryPool::allocateAligned(n * sizeof(T), alignof(T));
+        const std::size_t bytes = n * sizeof(T);
+        void* p = (alignof(T) <= kAlignment)
+                      ? MemoryPool::allocate(bytes)
+                      : MemoryPool::allocateAligned(bytes, alignof(T));
         if (!p)
             throw std::bad_alloc();
         return static_cast<T*>(p);

@@ -29,12 +29,18 @@ private:
     void* fetchFromCentralCache(size_t index);
     void returnToCentralCache(size_t index);
     void flushAll();
+    void queueRemoteFree(void* ptr, size_t index);
+    void flushRemoteBatch(size_t index);
+    bool freeSmall(void* ptr, size_t index);
     size_t getBatchNum(size_t size) const;
     size_t maxCachedBlocks(size_t size) const;
     bool shouldReturnToCentralCache(size_t index) const;
 
     std::array<void*, FREE_LIST_SIZE> freeList_{};
     std::array<size_t, FREE_LIST_SIZE> freeListSize_{};
+    // Cross-thread frees are buffered locally and published with one CAS per batch.
+    std::array<void*, FREE_LIST_SIZE> remoteBatch_{};
+    std::array<size_t, FREE_LIST_SIZE> remoteBatchSize_{};
 };
 
 } // namespace Kama_memoryPool

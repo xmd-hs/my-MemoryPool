@@ -568,31 +568,271 @@ void testLongRandomTraffic()
     std::cout << "Long random traffic test passed!" << std::endl;
 }
 
+void testCrossThreadUnsizedFree()
+{
+    std::cout << "Running cross-thread unsized free test..." << std::endl;
+
+    std::vector<void*> ptrs;
+    ptrs.reserve(2048);
+    for (int i = 0; i < 2048; ++i)
+    {
+        void* p = MemoryPool::allocate(96);
+        assert(p != nullptr);
+        ptrs.push_back(p);
+    }
+
+    std::thread releaser([&ptrs]() {
+        for (void* p : ptrs)
+            MemoryPool::deallocate(p); // unsized path + findSpan
+    });
+    releaser.join();
+
+    void* p = MemoryPool::allocate(96);
+    assert(p != nullptr);
+    std::memset(p, 0x11, 96);
+    MemoryPool::deallocate(p);
+
+    std::cout << "Cross-thread unsized free test passed!" << std::endl;
+}
+
+void testRemoteBatchPartialFlushOnThreadExit()
+{
+    std::cout << "Running remote-batch partial flush test..." << std::endl;
+
+    // Fewer than the remote batch limit so frees stay in the TLS buffer until
+    // the freeing thread exits and flushes the remainder.
+    constexpr int kCount = 40;
+    std::vector<void*> ptrs;
+    ptrs.reserve(kCount);
+    for (int i = 0; i < kCount; ++i)
+    {
+        void* p = MemoryPool::allocate(64);
+        assert(p != nullptr);
+        ptrs.push_back(p);
+    }
+
+    {
+        std::thread releaser([&ptrs]() {
+            for (void* p : ptrs)
+                MemoryPool::deallocate(p, 64);
+        });
+        releaser.join();
+    }
+
+    for (int i = 0; i < kCount; ++i)
+    {
+        void* p = MemoryPool::allocate(64);
+        assert(p != nullptr);
+        static_cast<unsigned char*>(p)[0] = 0x22;
+        MemoryPool::deallocate(p, 64);
+    }
+
+    std::cout << "Remote-batch partial flush test passed!" << std::endl;
+}
+
+void testMultiConsumerRemoteFree()
+{
+    std::cout << "Running multi-consumer remote free test..." << std::endl;
+
+    constexpr int kProducers = 4;
+    constexpr int kPerProducer = 512;
+    std::vector<std::vector<void*>> bins(kProducers);
+
+    std::vector<std::thread> producers;
+    for (int t = 0; t < kProducers; ++t)
+    {
+        producers.emplace_back([&bins, t, kPerProducer]() {
+            bins[t].reserve(kPerProducer);
+            for (int i = 0; i < kPerProducer; ++i)
+            {
+                void* p = MemoryPool::allocate(128);
+                assert(p != nullptr);
+                bins[t].push_back(p);
+            }
+        });
+    }
+    for (auto& th : producers)
+        th.join();
+
+    std::vector<std::thread> consumers;
+    for (int t = 0; t < kProducers; ++t)
+    {
+        consumers.emplace_back([&bins, t, kProducers]() {
+            // Consumer t frees producer ((t+1)%N) blocks → forced remote path.
+            const int src = (t + 1) % kProducers;
+            for (void* p : bins[src])
+                MemoryPool::deallocate(p, 128);
+        });
+    }
+    for (auto& th : consumers)
+        th.join();
+
+    void* p = MemoryPool::allocate(128);
+    assert(p != nullptr);
+    MemoryPool::deallocate(p, 128);
+
+    std::cout << "Multi-consumer remote free test passed!" << std::endl;
+}
+
+void testCApiAlignedAndSizedFree()
+{
+    std::cout << "Running C API aligned / sized free test..." << std::endl;
+
+    void* p = kama_alloc_aligned(100, 64);
+    assert(p != nullptr);
+    assert((reinterpret_cast<uintptr_t>(p) & 63) == 0);
+    std::memset(p, 0x33, 100);
+    kama_free_sized(p, 100);
+
+    void* q = kama_alloc(256);
+    assert(q != nullptr);
+    kama_free_sized(q, 256);
+
+    assert(kama_alloc_aligned(32, 0) == nullptr);
+    assert(kama_alloc_aligned(32, 3) == nullptr);
+
+    std::cout << "C API aligned / sized free test passed!" << std::endl;
+}
+
+void testWrongSizeFreeRejectedWithGuards()
+{
+    std::cout << "Running wrong-size free guard test..." << std::endl;
+
+#if !KAMA_MEMORY_POOL_DEBUG_GUARDS
+    std::cout << "Debug guards disabled, skipping." << std::endl;
+#else
+    void* p = MemoryPool::allocate(64);
+    assert(p != nullptr);
+    // Wrong size class should be rejected; pointer remains allocated.
+    MemoryPool::deallocate(p, 32);
+    std::memset(p, 0x44, 64);
+    MemoryPool::deallocate(p, 64);
+    std::cout << "Wrong-size free guard test passed!" << std::endl;
+#endif
+}
+
+void testPageCacheCapAndReuse()
+{
+    std::cout << "Running page-cache cap / reuse test..." << std::endl;
+
+    std::vector<void*> ptrs;
+    ptrs.reserve(128);
+    for (int i = 0; i < 128; ++i)
+    {
+        void* p = MemoryPool::allocate(512 * 1024);
+        assert(p != nullptr);
+        ptrs.push_back(p);
+    }
+    for (void* p : ptrs)
+        MemoryPool::deallocate(p);
+
+    const MemoryPoolStats afterFree = MemoryPool::stats();
+    assert(afterFree.cachedPageBytes <= 64ull * 1024 * 1024);
+
+    for (int i = 0; i < 32; ++i)
+    {
+        void* p = MemoryPool::allocate(400 * 1024);
+        assert(p != nullptr);
+        MemoryPool::deallocate(p);
+    }
+
+    std::cout << "Page-cache cap / reuse test passed!" << std::endl;
+}
+
+void testAllocatorGrowthAndClear()
+{
+    std::cout << "Running Allocator growth / clear test..." << std::endl;
+
+    {
+        std::vector<int, Allocator<int>> values;
+        for (int i = 0; i < 10000; ++i)
+            values.push_back(i);
+        assert(values.size() == 10000);
+        assert(values.front() == 0);
+        assert(values.back() == 9999);
+        values.clear();
+        values.shrink_to_fit();
+    }
+
+    {
+        std::vector<std::pair<int, int>, Allocator<std::pair<int, int>>> pairs;
+        for (int i = 0; i < 2000; ++i)
+            pairs.emplace_back(i, i * 2);
+        assert(pairs.size() == 2000);
+    }
+
+    std::cout << "Allocator growth / clear test passed!" << std::endl;
+}
+
+void testMixedSizedAndUnsizedTraffic()
+{
+    std::cout << "Running mixed sized/unsized traffic test..." << std::endl;
+
+    std::mt19937 rng(0xC0FFEEu);
+    std::vector<std::pair<void*, size_t>> sized;
+    std::vector<void*> unsized;
+    sized.reserve(2048);
+    unsized.reserve(2048);
+
+    for (int i = 0; i < 4000; ++i)
+    {
+        const size_t size = 16 + (rng() % 512);
+        void* p = MemoryPool::allocate(size);
+        assert(p != nullptr);
+        if (rng() & 1u)
+            sized.emplace_back(p, size);
+        else
+            unsized.push_back(p);
+    }
+
+    for (const auto& item : sized)
+        MemoryPool::deallocate(item.first, item.second);
+    for (void* p : unsized)
+        MemoryPool::deallocate(p);
+
+    std::cout << "Mixed sized/unsized traffic test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
     {
         std::cout << "Starting memory pool tests..." << std::endl;
 
+        // Core API
         testBasicAllocation();
         testMemoryWriting();
-        testMultiThreading();
         testEdgeCases();
-        testStress();
+        testInvalidInputs();
         testSizeClasses();
+        testEverySizeClassBoundary();
         testUnsizedDeallocate();
         testAlignedAndTyped();
-        testThreadExitReturnsMemory();
+        testAlignmentSweep();
+        testCApiAlignedAndSizedFree();
+        testAllocatorGrowthAndClear();
         testSdkWrappers();
-        testStatsAndSizedFreePath();
-        testCrossThreadSizedFree();
         testNewElementExceptionSafety();
+
+        // Concurrency / ownership transfer
+        testMultiThreading();
+        testThreadExitReturnsMemory();
+        testCrossThreadSizedFree();
+        testCrossThreadUnsizedFree();
+        testRemoteBatchPartialFlushOnThreadExit();
+        testMultiConsumerRemoteFree();
+
+        // Lifetime / cache / guards
+        testLargeSpanLifetime();
+        testPageCacheCapAndReuse();
+        testStatsAndSizedFreePath();
         testNoLeaksAfterMixedTraffic();
         testDebugGuards();
-        testLargeSpanLifetime();
-        testInvalidInputs();
-        testAlignmentSweep();
-        testEverySizeClassBoundary();
+        testWrongSizeFreeRejectedWithGuards();
+
+        // Stress
+        testStress();
+        testMixedSizedAndUnsizedTraffic();
         testLongRandomTraffic();
 
         std::cout << "All tests passed successfully!" << std::endl;

@@ -36,6 +36,18 @@ inline size_t systemPageSize()
     return cached;
 }
 
+inline size_t systemPageShift()
+{
+    static const size_t cached = []() -> size_t {
+        size_t ps = systemPageSize();
+        size_t shift = 0;
+        while ((static_cast<size_t>(1) << shift) < ps)
+            ++shift;
+        return shift;
+    }();
+    return cached;
+}
+
 inline size_t systemAllocGranularity()
 {
 #ifdef _WIN32
