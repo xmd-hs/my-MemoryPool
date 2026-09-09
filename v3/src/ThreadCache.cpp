@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstring>
 
 namespace Kama_memoryPool
 {
@@ -13,30 +12,13 @@ namespace Kama_memoryPool
 namespace
 {
 
-constexpr size_t kPageScCacheSize = 1024;
-thread_local uintptr_t g_pageScKey[kPageScCacheSize]{};
-thread_local uint8_t g_pageScVal[kPageScCacheSize]{};
-
-void clearPageClassCache()
-{
-    std::memset(g_pageScKey, 0, sizeof(g_pageScKey));
-}
-
 size_t lookupSizeClass(void* ptr)
 {
-    const uintptr_t page = reinterpret_cast<uintptr_t>(ptr) >> systemPageShift();
-    const size_t slot = page & (kPageScCacheSize - 1);
-    if (g_pageScKey[slot] == page)
-        return g_pageScVal[slot];
-
+    // Prefer the in-page tag (always current). Do not cache page->class in TLS:
+    // PageCache can recycle the same virtual page into another size class.
     const size_t ps = PageCache::pageSize();
     if (const PageTag* tag = pageTagIfValid(ptr, ps))
-    {
-        g_pageScKey[slot] = page;
-        if (tag->sizeClass < 256)
-            g_pageScVal[slot] = static_cast<uint8_t>(tag->sizeClass);
         return tag->sizeClass;
-    }
     return PageCache::getInstance().findSizeClass(ptr);
 }
 
@@ -48,10 +30,14 @@ constexpr size_t kRemoteBatchLimit = 128;
 
 struct LocalLargeCache
 {
-    static constexpr size_t kMaxCached = 256;
+    // Bound retained memory rather than span count. A count-only cap can
+    // retain an unexpectedly large amount of address space when large spans
+    // are used repeatedly.
+    static constexpr size_t kMaxCachedBytes = 8 * 1024 * 1024;
 
     Span* head = nullptr;
     size_t count = 0;
+    size_t bytes = 0;
 
     Span* take(size_t numPages)
     {
@@ -61,10 +47,11 @@ struct LocalLargeCache
             Span* span = *link;
             if (span->numPages == numPages)
             {
-                *link = span->next;
-                span->next = nullptr;
-                --count;
-                return span;
+            *link = span->next;
+            span->next = nullptr;
+            --count;
+            bytes -= span->numPages * PageCache::pageSize();
+            return span;
             }
             link = &span->next;
         }
@@ -73,11 +60,15 @@ struct LocalLargeCache
 
     bool store(Span* span)
     {
-        if (!span || count >= kMaxCached)
+        if (!span)
+            return false;
+        const size_t spanBytes = span->numPages * PageCache::pageSize();
+        if (spanBytes > kMaxCachedBytes || bytes > kMaxCachedBytes - spanBytes)
             return false;
         span->next = head;
         head = span;
         ++count;
+        bytes += spanBytes;
         return true;
     }
 
@@ -91,6 +82,7 @@ struct LocalLargeCache
             PageCache::getInstance().deallocateSpan(span);
         }
         count = 0;
+        bytes = 0;
     }
 };
 
@@ -264,7 +256,6 @@ void ThreadCache::flushAll()
         }
         flushRemoteBatch(i);
     }
-    clearPageClassCache();
 }
 
 size_t ThreadCache::maxCachedBlocks(size_t size) const
@@ -355,6 +346,7 @@ void* ThreadCache::allocate(size_t size)
     const size_t index = SizeClass::getIndex(size);
     if (void* ptr = freeList_[index])
     {
+        recordThreadCacheHit(index);
         void* next = *reinterpret_cast<void**>(ptr);
         freeList_[index] = next;
         --freeListSize_[index];
@@ -368,6 +360,7 @@ void* ThreadCache::allocate(size_t size)
         }
         return ptr;
     }
+    recordThreadCacheMiss(index);
     return fetchFromCentralCache(index);
 }
 
@@ -459,6 +452,18 @@ bool ThreadCache::deallocate(void* ptr, size_t size)
     return freeSmall(ptr, index);
 }
 
+void ThreadCache::trim()
+{
+    for (size_t index = 0; index < FREE_LIST_SIZE; ++index)
+    {
+        if (shouldReturnToCentralCache(index))
+            returnToCentralCache(index);
+    }
+    // Explicit trim is an idle-point operation, so release retained large
+    // spans as well. The destructor keeps the same full-flush behavior.
+    g_localLargeCache.flush();
+}
+
 void* ThreadCache::fetchFromCentralCache(size_t index)
 {
     const size_t size = SizeClass::getSize(index);
@@ -472,7 +477,7 @@ void* ThreadCache::fetchFromCentralCache(size_t index)
     freeList_[index] = *reinterpret_cast<void**>(start);
     freeListSize_[index] += fetchedCount > 0 ? fetchedCount - 1 : 0;
     if (fetchedCount > 0)
-        recordCentralRefill(fetchedCount);
+        recordCentralRefill(index, fetchedCount);
     if constexpr (kDebugGuardsEnabled)
     {
         Span* span = PageCache::getInstance().findSpan(result);
@@ -508,7 +513,7 @@ void ThreadCache::returnToCentralCache(size_t index)
     freeListSize_[index] = keepNum;
     if (nextNode)
     {
-        recordCentralFlush(batchNum - keepNum);
+        recordCentralFlush(index, batchNum - keepNum);
         CentralCache::getInstance().pushTransfer(nextNode, batchNum - keepNum, index);
     }
 }

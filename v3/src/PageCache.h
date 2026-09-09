@@ -41,7 +41,6 @@ struct Span
 // Trailing per-page tag so unsized free can recover the size class from the
 // same page as the object (glibc-style) instead of walking the radix map.
 constexpr uint64_t kPageTagMagic = 0x4B614D61506F6F6CULL; // "KaMaPool"
-constexpr size_t kPageTagBytes = 64;
 
 struct PageTag
 {
@@ -49,6 +48,10 @@ struct PageTag
     uint32_t sizeClass;
     uint32_t _pad;
 };
+
+// The tag contains 16 bytes of metadata. Reserve only that suffix instead
+// of wasting a full cache line on every small-object page.
+constexpr size_t kPageTagBytes = sizeof(PageTag);
 
 inline uint64_t pageTagCookie(uintptr_t pageBase)
 {

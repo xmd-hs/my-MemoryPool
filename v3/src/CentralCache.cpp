@@ -42,8 +42,7 @@ size_t CentralCache::shardIndex(size_t sizeClassIndex, size_t shardId) const
 
 Span* CentralCache::createSpan(size_t index)
 {
-    // createSpan uses SizeClass::slotSize — for usable > 256 that equals usable
-    // (no header); for small classes it includes kBlockHeaderSize.
+    // createSpan uses SizeClass::slotSize — equals usable bytes (no per-block header).
     const size_t blockSize = SizeClass::slotSize(index);
     const size_t usable = SizeClass::getSize(index);
     const size_t ps = PageCache::pageSize();
@@ -326,7 +325,9 @@ void CentralCache::collectGroups(void* list, size_t index, std::vector<SpanFreeG
 
 void CentralCache::mergeRemoteFrees(size_t index, size_t shardId)
 {
-    remotePending_[index].store(0, std::memory_order_relaxed);
+    // Clear the hint atomically. A concurrent publisher can set it back to 1
+    // without being lost between the check and the list exchanges below.
+    remotePending_[index].exchange(0, std::memory_order_acq_rel);
     std::vector<SpanFreeGroup> groups;
     groups.reserve(16);
 
@@ -628,6 +629,9 @@ void CentralCache::returnRange(void* start, size_t blockCount, size_t index)
 
     (void)blockCount;
     std::vector<SpanFreeGroup> groups;
+    // Thread-exit and batch-return paths usually touch only a handful of
+    // spans. Reserve once to avoid allocator traffic in the reclamation path.
+    groups.reserve(8);
     collectGroups(start, index, groups);
     returnGroups(index, localShardId(), groups);
 }

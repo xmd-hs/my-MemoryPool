@@ -20,6 +20,10 @@ std::atomic<std::uint64_t> g_centralRefillCount{0};
 std::atomic<std::uint64_t> g_centralFlushCount{0};
 std::atomic<std::uint64_t> g_centralLockWaits{0};
 std::atomic<std::uint64_t> g_remoteFreeCount{0};
+std::array<std::atomic<std::uint64_t>, kMaxSizeClasses> g_refillByClass{};
+std::array<std::atomic<std::uint64_t>, kMaxSizeClasses> g_flushByClass{};
+std::array<std::atomic<std::uint64_t>, kMaxSizeClasses> g_tlsHitByClass{};
+std::array<std::atomic<std::uint64_t>, kMaxSizeClasses> g_tlsMissByClass{};
 }
 
 void recordAllocation(size_t size)
@@ -27,7 +31,9 @@ void recordAllocation(size_t size)
     if constexpr (!kStatsEnabled)
         return;
     g_allocCount.fetch_add(1, std::memory_order_relaxed);
-    if (size > MAX_BYTES)
+    // Keep statistics consistent with ThreadCache: MAX_BYTES itself takes
+    // the large-object path.
+    if (size >= MAX_BYTES)
         g_largeAllocCount.fetch_add(1, std::memory_order_relaxed);
     else
         g_smallAllocCount.fetch_add(1, std::memory_order_relaxed);
@@ -44,18 +50,36 @@ void recordFree(bool sized)
         g_unsizedFreeCount.fetch_add(1, std::memory_order_relaxed);
 }
 
-void recordCentralRefill(size_t count)
+void recordCentralRefill(size_t index, size_t count)
 {
     if constexpr (!kStatsEnabled)
         return;
     g_centralRefillCount.fetch_add(count, std::memory_order_relaxed);
+    if (index < kMaxSizeClasses)
+        g_refillByClass[index].fetch_add(count, std::memory_order_relaxed);
 }
 
-void recordCentralFlush(size_t count)
+void recordCentralFlush(size_t index, size_t count)
 {
     if constexpr (!kStatsEnabled)
         return;
     g_centralFlushCount.fetch_add(count, std::memory_order_relaxed);
+    if (index < kMaxSizeClasses)
+        g_flushByClass[index].fetch_add(count, std::memory_order_relaxed);
+}
+
+void recordThreadCacheHit(size_t index)
+{
+    if constexpr (kStatsEnabled)
+        if (index < kMaxSizeClasses)
+            g_tlsHitByClass[index].fetch_add(1, std::memory_order_relaxed);
+}
+
+void recordThreadCacheMiss(size_t index)
+{
+    if constexpr (kStatsEnabled)
+        if (index < kMaxSizeClasses)
+            g_tlsMissByClass[index].fetch_add(1, std::memory_order_relaxed);
 }
 
 void recordCentralLockWait(std::uint64_t count)
@@ -106,6 +130,11 @@ void MemoryPool::deallocate(void* ptr, std::size_t size)
         recordFree(true);
 }
 
+void MemoryPool::trim()
+{
+    ThreadCache::getInstance()->trim();
+}
+
 MemoryPoolStats MemoryPool::stats()
 {
     MemoryPoolStats out;
@@ -124,6 +153,13 @@ MemoryPoolStats MemoryPool::stats()
     out.centralFlushCount = g_centralFlushCount.load(std::memory_order_relaxed);
     out.centralLockWaits = g_centralLockWaits.load(std::memory_order_relaxed);
     out.remoteFreeCount = g_remoteFreeCount.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kMaxSizeClasses; ++i)
+    {
+        out.centralRefillByClass[i] = g_refillByClass[i].load(std::memory_order_relaxed);
+        out.centralFlushByClass[i] = g_flushByClass[i].load(std::memory_order_relaxed);
+        out.threadCacheHitByClass[i] = g_tlsHitByClass[i].load(std::memory_order_relaxed);
+        out.threadCacheMissByClass[i] = g_tlsMissByClass[i].load(std::memory_order_relaxed);
+    }
     return out;
 }
 

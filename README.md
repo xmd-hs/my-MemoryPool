@@ -2,13 +2,13 @@
 
 # my-MemoryPool
 
-C++17 内存池。推荐 **v3**：线程本地缓存 → 按 size class 分片的中央缓存 → 页缓存，用来降低系统分配器调用和多线程锁竞争。
+C++17 内存池。日常用 **v3**：线程本地缓存 → 按 size class 分片的中央缓存（含 lock-free Transfer）→ 页缓存，用来摊掉系统分配器调用和多线程锁竞争。
 
-小对象路径覆盖 **8B–512KiB**。池里拿到的指针必须用本项目接口释放，不能和 `free` / `delete` 混用。非法输入返回 `nullptr`；`Allocator<T>` 把失败转成 `std::bad_alloc`。
+小对象覆盖 **8B–512KiB**。池里拿到的指针必须用本项目接口释放，不能和 `free` / `delete` 混用。非法输入返回 `nullptr`；`Allocator<T>` 把失败转成 `std::bad_alloc`。
 
 ## 对外 API
 
-头文件在 `v3/include/kama/`。下面与源码一致，没有列出未导出或未使用的符号。
+头文件在 `v3/include/kama/`。
 
 ### C++：`MemoryPool.h`
 
@@ -22,19 +22,20 @@ class MemoryPool {
 public:
     static void* allocate(std::size_t size);
     static void* allocateAligned(std::size_t size, std::size_t alignment);
-    static void  deallocate(void* ptr);                 // unsized
+    static void  deallocate(void* ptr);                  // unsized
     static void  deallocate(void* ptr, std::size_t size); // sized，更快
+    static void  trim();                                 // 只收当前线程多余缓存
     static MemoryPoolStats stats();
 
     template<typename T, typename... Args>
     static T* newElement(Args&&... args);   // 构造失败会释放内存并重新抛出
 
     template<typename T>
-    static void deleteElement(T* p);        // 先析构再 deallocate
+    static void deleteElement(T* p);
 };
 
 template<typename T, typename... Args>
-T* newElement(Args&&... args);              // 等价于 MemoryPool::newElement
+T* newElement(Args&&... args);
 
 template<typename T>
 void deleteElement(T* p);
@@ -45,9 +46,10 @@ void deleteElement(T* p);
 |---|---|
 | `allocate(size)` | `size == 0` 按 8 字节处理；`size >= kMaxBytes` 走大对象 span |
 | `allocateAligned(size, alignment)` | `alignment` 必须是 2 的幂且非 0，否则 `nullptr`；`alignment <= 8` 时等同 `allocate` |
-| `deallocate(ptr)` | `ptr == nullptr` 为空操作；通过页标签 / 页表恢复 size class |
-| `deallocate(ptr, size)` | 调用方提供 size，避免查找 |
-| `stats()` | `reservedBytes` / `cachedPageBytes` 始终有效；其余计数需编译时打开 `KAMA_MEMORY_POOL_ENABLE_STATS` |
+| `deallocate(ptr)` | `ptr == nullptr` 为空操作；页尾 PageTag（≤256B）或基数页表恢复 size class |
+| `deallocate(ptr, size)` | 调用方提供 size，不查页表 |
+| `trim()` | 把当前线程超水位的小对象推到 Transfer，并清空本线程大 span 缓存；不扫描其他线程 |
+| `stats()` | `reservedBytes` / `cachedPageBytes` 始终有效；其余计数需打开 `KAMA_MEMORY_POOL_ENABLE_STATS` |
 
 ### C++：`Allocator.h`
 
@@ -63,7 +65,7 @@ public:
 };
 ```
 
-`alignof(T) <= 8` 时走 sized 路径；更大对齐走 `allocateAligned` + unsized free。
+`alignof(T) <= 8` 时走 sized 路径；更大对齐走 `allocateAligned` + unsized free。无状态：`is_always_equal`，任意两个 `Allocator` 相等。
 
 ### C：`kama_memory_pool.h`
 
@@ -72,9 +74,10 @@ void* kama_alloc(size_t size);
 void* kama_alloc_aligned(size_t size, size_t alignment);
 void  kama_free(void* ptr);
 void  kama_free_sized(void* ptr, size_t size);
+void  kama_trim(void);
 ```
 
-分别对应 `MemoryPool::allocate` / `allocateAligned` / `deallocate` / `deallocate(ptr, size)`。
+分别对应 `allocate` / `allocateAligned` / `deallocate` / `deallocate(ptr, size)` / `trim`。
 
 ### 示例
 
@@ -98,6 +101,8 @@ void demo() {
 
     void* q = kama_alloc(32);
     kama_free(q);
+
+    MemoryPool::trim();   // 空闲点收回本线程多余缓存
 }
 ```
 
@@ -105,24 +110,24 @@ void demo() {
 
 ```text
 my-MemoryPool/
-├── v1/     教学版：固定槽大小 + 无锁自由链表
-├── v2/     三层缓存早期实现
-├── v3/     推荐版本
-│   ├── include/kama/     对外头文件
-│   ├── src/              ThreadCache / CentralCache / PageCache
-│   ├── tests/            unit_test、perf_test
-│   ├── examples/
-│   └── CMakeLists.txt
-└── README.md
+|-- v1/     教学版：固定槽 + 带 tag 的无锁自由链表
+|-- v2/     三层缓存早期实现
+|-- v3/     推荐版本
+|   |-- include/kama/     对外头文件
+|   |-- src/              ThreadCache / CentralCache / PageCache
+|   |-- tests/            unit_test、perf_test
+|   |-- examples/
+|   `-- CMakeLists.txt
+`-- README.md
 ```
 
-日常使用只需要 v3。v1 / v2 保留作对照。
+日常只用 v3。v1 / v2 留作对照。
 
 | 版本 | 模型 | 小对象上限 |
 |---|---|---|
 | v1 | 每档一个固定槽池 | 512B |
 | v2 | 三层缓存初版 | 256KiB |
-| v3 | 三层缓存 + 分片 + 页标签 + transfer | 512KiB |
+| v3 | 三层 + 8 分片 + Transfer + 页标签 | 512KiB |
 
 ## 架构
 
@@ -132,42 +137,43 @@ flowchart TB
     B --> C{大小与对齐}
     C -->|小于 512KiB| D[ThreadCache<br/>线程本地空闲链表]
     D -->|批量补给 / 溢出 / 线程退出| E[CentralCache]
-    E --> E1[size class × 8 分片]
-    E --> E2[lock-free transfer]
-    E --> E3[remote free]
+    E --> E1[size class x 8 分片]
+    E --> E2[lock-free Transfer]
+    E --> E3[remote free 回收集成]
     E1 --> F[Span]
     F --> G[PageCache]
-    C -->|大对象或特殊对齐| G
-    G --> H[VirtualAlloc / mmap]
-    G --> I[三级基数页表]
+    C -->|大对象或特殊对齐| H[TLS 大 span 缓存 上限 8MiB]
+    H -->|miss| G
+    G --> I[VirtualAlloc / mmap]
+    G --> J[三级 lock-free 基数页表]
 ```
 
-同线程小对象只在 ThreadCache 链表上 pop/push。中央层处理批量补给、跨线程归还和线程退出。页层向系统申请/归还页，空闲页缓存上限约 64MiB。
+同线程小对象只在 ThreadCache 链表上 pop/push。中央层处理批量补给、Transfer 杂志和分片 steal。页层向系统申请/归还页，空闲页缓存上限约 64MiB。
 
 ```mermaid
 flowchart TD
-    A[allocate] --> B{≥ 512KiB?}
-    B -->|是| L[大对象 TLS 回收 → PageCache]
+    A[allocate] --> B{大于等于 512KiB?}
+    B -->|是| L[TLS 大 span 缓存 → PageCache]
     B -->|否| C[size class]
     C --> D{TLS 有空闲块?}
-    D -->|是| E[弹出]
-    D -->|否| F[CentralCache]
-    F --> G[本分片 → transfer → steal → remote → 新 span]
+    D -->|是| E[弹出并 prefetch 下一块]
+    D -->|否| F[CentralCache.fetchRange]
+    F --> G[本分片 → Transfer → steal → merge remote → 新 span]
 ```
 
 ```mermaid
 flowchart TD
-    A{deallocate 带 size?} -->|是| B[直接入对应 size class]
-    A -->|否| C[页尾 PageTag / TLS 页缓存 / 页表]
-    B --> D{本线程的块?}
-    C --> D
-    D -->|是| E[TLS 自由链表]
-    D -->|否| F[remote batch]
-    E -->|超过上限| G[transfer，超额归还 span]
-    H[线程退出] --> I[TLS 整链转入 transfer]
+    A[deallocate] --> B{带 size 且小于 512KiB?}
+    B -->|是| C[SizeClass::getIndex]
+    B -->|否| D[PageTag 或基数页表 / 大对象 findLargeSpan]
+    C --> E[插入本线程 TLS]
+    D --> E
+    E -->|超水位| F[pushTransfer]
+    F -->|Transfer 满| G[returnRange 回所属 span]
+    H[线程退出] --> I[TLS 整链 pushTransfer]
 ```
 
-unsized free（只给指针）是相对 glibc 的关键路径：≤256B 的页在页尾写 `PageTag`，同页 O(1) 恢复 size class。
+unsized free（只给指针）是相对 glibc 的关键路径：`blockSize <= 256` 的页在页尾写 `PageTag`，同页 O(1) 恢复 size class；失效再走无锁基数页表。
 
 ## 构建
 
@@ -197,13 +203,15 @@ Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_
 
 ## 测试
 
-`unit_test` 覆盖：小/中/大对象、size class 边界、对齐、非法输入、C API、STL Allocator、`newElement` 异常回滚、多线程、跨线程 sized/unsized free、线程退出、页缓存上限、长随机压力。本轮 Windows / Linux Release 均为 **All tests passed**。
+`unit_test` 覆盖：小/中/大对象、size class 边界、对齐、非法输入、C API、STL Allocator、`newElement` 异常回滚、`trim`、多线程、跨线程 sized/unsized free、线程退出、页缓存上限、页复用后再 unsized、长随机压力。
 
 `perf_test` 对比 `MemoryPool` / `new[]+delete[]` / `malloc+free`。核心场景 9 次取中位数，可扩展矩阵 3 次取中位数。快于基线 5% 为 WIN，慢于 5% 为 LOSE，否则 TIE。对 new 和 malloc 各判一次；**任一 LOSE 则进程返回非 0**。
 
 ## 性能数据
 
-以下为 **2026-09-07 本机单次套件输出**（未四舍五入），单位毫秒，越小越好。统计和 Debug Guards 关闭。换机器或负载后请自行跑 `perf_test`。
+以下为 **2026-09-07 本机单次套件输出**（提交 `2855c59`，未四舍五入），单位毫秒，越小越好。统计和 Debug Guards 关闭。换机器或负载后请自行跑 `perf_test`。
+
+后续维护（`trim`、页标签收小、大对象 8MiB 字节上限等）没有改分配语义。Windows 上后来复测核心套件仍是 **48 WIN / 0 TIE / 0 LOSE**。
 
 ### Windows 11 / MSVC Release + LTCG
 
@@ -288,5 +296,7 @@ Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_
 ## 注意事项
 
 - 测速请关闭统计和 Debug Guards。发布前建议在目标平台跑 ASan、UBSan 或 TSan。
-- 页缓存上限约 64MiB，超出的空闲页还回系统。
+- 页缓存上限约 64MiB，超出的完整 origin 还回系统。大对象本线程复用上限 8MiB。
+- `trim()` 只作用于当前线程，不是全局回收。
+- 默认关 Guards 时，错误 size / double free 仍可能破坏内部链表。
 - 仓库目前没有单独的许可证文件。

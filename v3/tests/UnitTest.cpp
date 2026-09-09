@@ -2,18 +2,54 @@
 #include <kama/Allocator.h>
 #include <kama/kama_memory_pool.h>
 #include "Common.h"
-#include <iostream>
-#include <vector>
-#include <thread>
-#include <cassert>
-#include <cstdint>
-#include <cstring>
-#include <random>
+
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <random>
 #include <stdexcept>
+#include <thread>
+#include <tuple>
+#include <vector>
 
 using namespace Kama_memoryPool;
+
+#define REQUIRE(cond)                                                                 \
+    do                                                                                \
+    {                                                                                 \
+        if (!(cond))                                                                  \
+        {                                                                             \
+            std::cerr << "REQUIRE failed: " #cond " (" << __FILE__ << ":" << __LINE__ \
+                      << ")" << std::endl;                                            \
+            std::abort();                                                             \
+        }                                                                             \
+    } while (0)
+
+namespace
+{
+
+void fillPattern(void* ptr, size_t size, std::uint32_t seed)
+{
+    auto* bytes = static_cast<unsigned char*>(ptr);
+    for (size_t i = 0; i < size; ++i)
+        bytes[i] = static_cast<unsigned char>(seed + static_cast<std::uint32_t>(i));
+}
+
+bool checkPattern(void* ptr, size_t size, std::uint32_t seed)
+{
+    const auto* bytes = static_cast<const unsigned char*>(ptr);
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (bytes[i] != static_cast<unsigned char>(seed + static_cast<std::uint32_t>(i)))
+            return false;
+    }
+    return true;
+}
+
+} // namespace
 
 // 基础分配测试
 void testBasicAllocation() 
@@ -22,17 +58,17 @@ void testBasicAllocation()
     
     // 测试小内存分配
     void* ptr1 = MemoryPool::allocate(8);
-    assert(ptr1 != nullptr);
+    REQUIRE(ptr1 != nullptr);
     MemoryPool::deallocate(ptr1, 8);
 
     // 测试中等大小内存分配
     void* ptr2 = MemoryPool::allocate(1024);
-    assert(ptr2 != nullptr);
+    REQUIRE(ptr2 != nullptr);
     MemoryPool::deallocate(ptr2, 1024);
 
     // 测试大内存分配（超过MAX_BYTES）
     void* ptr3 = MemoryPool::allocate(1024 * 1024);
-    assert(ptr3 != nullptr);
+    REQUIRE(ptr3 != nullptr);
     MemoryPool::deallocate(ptr3, 1024 * 1024);
 
     std::cout << "Basic allocation test passed!" << std::endl;
@@ -46,7 +82,7 @@ void testMemoryWriting()
     // 分配并写入数据
     const size_t size = 128;
     char* ptr = static_cast<char*>(MemoryPool::allocate(size));
-    assert(ptr != nullptr);
+    REQUIRE(ptr != nullptr);
 
     // 写入数据
     for (size_t i = 0; i < size; ++i) 
@@ -57,7 +93,7 @@ void testMemoryWriting()
     // 验证数据
     for (size_t i = 0; i < size; ++i) 
     {
-        assert(ptr[i] == static_cast<char>(i % 256));
+        REQUIRE(ptr[i] == static_cast<char>(i % 256));
     }
 
     MemoryPool::deallocate(ptr, size);
@@ -136,23 +172,23 @@ void testEdgeCases()
     
     // 测试0大小分配
     void* ptr1 = MemoryPool::allocate(0);
-    assert(ptr1 != nullptr);
+    REQUIRE(ptr1 != nullptr);
     MemoryPool::deallocate(ptr1, 0);
     
     // 测试最小对齐大小
     void* ptr2 = MemoryPool::allocate(1);
-    assert(ptr2 != nullptr);
-    assert((reinterpret_cast<uintptr_t>(ptr2) & (ALIGNMENT - 1)) == 0);
+    REQUIRE(ptr2 != nullptr);
+    REQUIRE((reinterpret_cast<uintptr_t>(ptr2) & (ALIGNMENT - 1)) == 0);
     MemoryPool::deallocate(ptr2, 1);
     
     // 测试最大大小边界
     void* ptr3 = MemoryPool::allocate(MAX_BYTES);
-    assert(ptr3 != nullptr);
+    REQUIRE(ptr3 != nullptr);
     MemoryPool::deallocate(ptr3, MAX_BYTES);
     
     // 测试超过最大大小
     void* ptr4 = MemoryPool::allocate(MAX_BYTES + 1);
-    assert(ptr4 != nullptr);
+    REQUIRE(ptr4 != nullptr);
     MemoryPool::deallocate(ptr4, MAX_BYTES + 1);
     
     std::cout << "Edge cases test passed!" << std::endl;
@@ -171,7 +207,7 @@ void testStress()
     {
         size_t size = (rand() % 1024 + 1) * 8;
         void* ptr = MemoryPool::allocate(size);
-        assert(ptr != nullptr);
+        REQUIRE(ptr != nullptr);
         allocations.push_back({ptr, size});
     }
 
@@ -190,15 +226,15 @@ void testStress()
 void testSizeClasses()
 {
     std::cout << "Running size class test..." << std::endl;
-    assert(SizeClass::classCount() > 0);
-    assert(SizeClass::getSize(0) == ALIGNMENT);
-    assert(SizeClass::getSize(SizeClass::classCount() - 1) == MAX_BYTES);
+    REQUIRE(SizeClass::classCount() > 0);
+    REQUIRE(SizeClass::getSize(0) == ALIGNMENT);
+    REQUIRE(SizeClass::getSize(SizeClass::classCount() - 1) == MAX_BYTES);
 
     for (size_t n = 1; n <= 4096; ++n)
     {
         const size_t rounded = SizeClass::roundUp(n);
-        assert(rounded >= n);
-        assert(rounded == SizeClass::getSize(SizeClass::getIndex(n)));
+        REQUIRE(rounded >= n);
+        REQUIRE(rounded == SizeClass::getSize(SizeClass::getIndex(n)));
         (void)rounded;
     }
 
@@ -210,11 +246,11 @@ void testUnsizedDeallocate()
     std::cout << "Running unsized deallocate test..." << std::endl;
 
     void* p1 = MemoryPool::allocate(32);
-    assert(p1 != nullptr);
+    REQUIRE(p1 != nullptr);
     MemoryPool::deallocate(p1);
 
     void* p2 = MemoryPool::allocate(1024 * 1024);
-    assert(p2 != nullptr);
+    REQUIRE(p2 != nullptr);
     MemoryPool::deallocate(p2);
 
     std::cout << "Unsized deallocate test passed!" << std::endl;
@@ -225,14 +261,14 @@ void testAlignedAndTyped()
     std::cout << "Running aligned / typed allocation test..." << std::endl;
 
     void* p = MemoryPool::allocateAligned(24, 16);
-    assert(p != nullptr);
-    assert((reinterpret_cast<uintptr_t>(p) & 15) == 0);
+    REQUIRE(p != nullptr);
+    REQUIRE((reinterpret_cast<uintptr_t>(p) & 15) == 0);
     MemoryPool::deallocate(p);
 
     struct alignas(16) Vec4 { float v[4]; };
     Vec4* v = newElement<Vec4>();
-    assert(v != nullptr);
-    assert((reinterpret_cast<uintptr_t>(v) & 15) == 0);
+    REQUIRE(v != nullptr);
+    REQUIRE((reinterpret_cast<uintptr_t>(v) & 15) == 0);
     v->v[0] = 1.0f;
     deleteElement(v);
 
@@ -247,7 +283,7 @@ void testThreadExitReturnsMemory()
         for (int i = 0; i < 256; ++i)
         {
             void* p = MemoryPool::allocate(64);
-            assert(p != nullptr);
+            REQUIRE(p != nullptr);
             MemoryPool::deallocate(p);
         }
         // 离开作用域时 ThreadCache 析构，应把残留块还给 CentralCache
@@ -262,7 +298,7 @@ void testThreadExitReturnsMemory()
         t.join();
 
     void* p = MemoryPool::allocate(128);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     MemoryPool::deallocate(p);
 
     std::cout << "Thread-exit return test passed!" << std::endl;
@@ -273,15 +309,16 @@ void testSdkWrappers()
     std::cout << "Running SDK wrapper test..." << std::endl;
 
     void* p = kama_alloc(48);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     static_cast<char*>(p)[0] = 1;
     kama_free(p);
+    kama_trim();
 
     std::vector<int, Allocator<int>> nums;
     nums.push_back(1);
     nums.push_back(2);
-    assert(nums.size() == 2);
-    assert(nums[0] == 1);
+    REQUIRE(nums.size() == 2);
+    REQUIRE(nums[0] == 1);
 
     std::cout << "SDK wrapper test passed!" << std::endl;
 }
@@ -302,21 +339,21 @@ void testStatsAndSizedFreePath()
 
     void* p1 = MemoryPool::allocate(24);
     void* p2 = MemoryPool::allocate(512 * 1024);
-    assert(p1 != nullptr);
-    assert(p2 != nullptr);
+    REQUIRE(p1 != nullptr);
+    REQUIRE(p2 != nullptr);
 
     MemoryPool::deallocate(p1, 24);
     MemoryPool::deallocate(p2, 512 * 1024);
 
 #if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
-    assert(after.allocCount >= before.allocCount + 2);
-    assert(after.freeCount >= before.freeCount + 2);
-    assert(after.smallAllocCount >= before.smallAllocCount + 1);
-    assert(after.largeAllocCount >= before.largeAllocCount + 1);
-    assert(after.sizedFreeCount >= before.sizedFreeCount + 2);
-    assert(after.centralRefillCount >= before.centralRefillCount);
-    assert(after.centralFlushCount >= before.centralFlushCount);
+    REQUIRE(after.allocCount >= before.allocCount + 2);
+    REQUIRE(after.freeCount >= before.freeCount + 2);
+    REQUIRE(after.smallAllocCount >= before.smallAllocCount + 1);
+    REQUIRE(after.largeAllocCount >= before.largeAllocCount + 1);
+    REQUIRE(after.sizedFreeCount >= before.sizedFreeCount + 2);
+    REQUIRE(after.centralRefillCount >= before.centralRefillCount);
+    REQUIRE(after.centralFlushCount >= before.centralFlushCount);
 
     std::cout << "Stats / sized free test passed!" << std::endl;
 #endif
@@ -332,7 +369,7 @@ void testCrossThreadSizedFree()
     for (int i = 0; i < 1024; ++i)
     {
         void* p = MemoryPool::allocate(64);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         ptrs.push_back(p);
     }
 
@@ -343,7 +380,7 @@ void testCrossThreadSizedFree()
     releaser.join();
 
     void* p = MemoryPool::allocate(64);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     MemoryPool::deallocate(p, 64);
 
     std::cout << "Cross-thread sized free test passed!" << std::endl;
@@ -370,15 +407,15 @@ void testNewElementExceptionSafety()
     {
         thrown = true;
     }
-    assert(thrown);
+    REQUIRE(thrown);
     (void)thrown;
 
 #if KAMA_MEMORY_POOL_STATS_ENABLED
     {
         const MemoryPoolStats after = MemoryPool::stats();
-        assert(after.allocCount >= before.allocCount + 1);
-        assert(after.freeCount >= before.freeCount + 1);
-        assert(after.liveAllocs == before.liveAllocs);
+        REQUIRE(after.allocCount >= before.allocCount + 1);
+        REQUIRE(after.freeCount >= before.freeCount + 1);
+        REQUIRE(after.liveAllocs == before.liveAllocs);
     }
 #endif
 
@@ -401,7 +438,7 @@ void testNoLeaksAfterMixedTraffic()
         {
             const size_t size = (i % 2 == 0) ? ((i % 256) + 1) * 8 : (64 + (i % 8) * 64);
             void* p = MemoryPool::allocate(size);
-            assert(p != nullptr);
+            REQUIRE(p != nullptr);
             ptrs.emplace_back(p, size);
         }
 
@@ -424,14 +461,14 @@ void testNoLeaksAfterMixedTraffic()
     }
 
     void* big = MemoryPool::allocate(1024 * 1024);
-    assert(big != nullptr);
+    REQUIRE(big != nullptr);
     MemoryPool::deallocate(big, 1024 * 1024);
 
 #if KAMA_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
-    assert(after.liveAllocs == before.liveAllocs);
-    assert(after.cachedPageBytes <= 64ull * 1024 * 1024);
-    assert(after.reservedBytes >= after.cachedPageBytes);
+    REQUIRE(after.liveAllocs == before.liveAllocs);
+    REQUIRE(after.cachedPageBytes <= 64ull * 1024 * 1024);
+    REQUIRE(after.reservedBytes >= after.cachedPageBytes);
 #endif
 
     std::cout << "No-leak mixed traffic test passed!" << std::endl;
@@ -451,12 +488,12 @@ void testDebugGuards()
     const MemoryPoolStats before = MemoryPool::stats();
 
     void* p = MemoryPool::allocate(64);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     MemoryPool::deallocate(p, 64);
     MemoryPool::deallocate(p, 64); // double free should be rejected
 
     void* q = MemoryPool::allocate(64);
-    assert(q != nullptr);
+    REQUIRE(q != nullptr);
     MemoryPool::deallocate(static_cast<char*>(q) + 8, 64); // interior pointer should be rejected
     MemoryPool::deallocate(q, 64);
 
@@ -464,7 +501,7 @@ void testDebugGuards()
     MemoryPool::deallocate(foreign, 64); // foreign pointer should be ignored
 
     const MemoryPoolStats after = MemoryPool::stats();
-    assert(after.liveAllocs == before.liveAllocs);
+    REQUIRE(after.liveAllocs == before.liveAllocs);
 
     std::cout << "Debug guard test passed!" << std::endl;
 #endif
@@ -475,13 +512,13 @@ void testLargeSpanLifetime()
     std::cout << "Running large span lifetime test..." << std::endl;
 
     void* first = MemoryPool::allocate(300 * 1024);
-    assert(first != nullptr);
+    REQUIRE(first != nullptr);
     MemoryPool::deallocate(first);
 
     void* reused = MemoryPool::allocate(280 * 1024);
     void* neighbor = MemoryPool::allocate(16 * 1024);
-    assert(reused != nullptr);
-    assert(neighbor != nullptr);
+    REQUIRE(reused != nullptr);
+    REQUIRE(neighbor != nullptr);
     static_cast<unsigned char*>(neighbor)[0] = 0x5a;
     MemoryPool::deallocate(reused);
     static_cast<unsigned char*>(neighbor)[0] = 0xa5;
@@ -493,10 +530,10 @@ void testLargeSpanLifetime()
 void testInvalidInputs()
 {
     std::cout << "Running invalid input test..." << std::endl;
-    assert(MemoryPool::allocateAligned(64, 0) == nullptr);
-    assert(MemoryPool::allocateAligned(64, 3) == nullptr);
-    assert(MemoryPool::allocateAligned(SIZE_MAX, 64) == nullptr);
-    assert(MemoryPool::allocate(SIZE_MAX) == nullptr);
+    REQUIRE(MemoryPool::allocateAligned(64, 0) == nullptr);
+    REQUIRE(MemoryPool::allocateAligned(64, 3) == nullptr);
+    REQUIRE(MemoryPool::allocateAligned(SIZE_MAX, 64) == nullptr);
+    REQUIRE(MemoryPool::allocate(SIZE_MAX) == nullptr);
     std::cout << "Invalid input test passed!" << std::endl;
 }
 
@@ -510,8 +547,8 @@ void testAlignmentSweep()
                             size_t(1023), size_t(4097), size_t(64 * 1024)})
         {
             void* ptr = MemoryPool::allocateAligned(size, alignment);
-            assert(ptr != nullptr);
-            assert((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0);
+            REQUIRE(ptr != nullptr);
+            REQUIRE((reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0);
             std::memset(ptr, 0xa5, size);
             MemoryPool::deallocate(ptr);
         }
@@ -528,7 +565,7 @@ void testEverySizeClassBoundary()
         for (size_t size : {boundary > 1 ? boundary - 1 : boundary, boundary})
         {
             void* ptr = MemoryPool::allocate(size);
-            assert(ptr != nullptr);
+            REQUIRE(ptr != nullptr);
             std::memset(ptr, static_cast<int>(index), size);
             MemoryPool::deallocate(ptr, size);
         }
@@ -549,6 +586,8 @@ void testLongRandomTraffic()
         if (!live.empty() && (rng() % 3u == 0))
         {
             const size_t index = rng() % live.size();
+            REQUIRE(checkPattern(live[index].first, live[index].second,
+                                 static_cast<std::uint32_t>(live[index].second)));
             MemoryPool::deallocate(live[index].first, live[index].second);
             live[index] = live.back();
             live.pop_back();
@@ -557,14 +596,17 @@ void testLongRandomTraffic()
         {
             const size_t size = sizeDist(rng);
             void* ptr = MemoryPool::allocate(size);
-            assert(ptr != nullptr);
-            static_cast<unsigned char*>(ptr)[0] = 0x3c;
+            REQUIRE(ptr != nullptr);
+            fillPattern(ptr, size, static_cast<std::uint32_t>(size));
             live.emplace_back(ptr, size);
         }
     }
 
     for (const auto& item : live)
+    {
+        REQUIRE(checkPattern(item.first, item.second, static_cast<std::uint32_t>(item.second)));
         MemoryPool::deallocate(item.first, item.second);
+    }
     std::cout << "Long random traffic test passed!" << std::endl;
 }
 
@@ -577,7 +619,7 @@ void testCrossThreadUnsizedFree()
     for (int i = 0; i < 2048; ++i)
     {
         void* p = MemoryPool::allocate(96);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         ptrs.push_back(p);
     }
 
@@ -588,7 +630,7 @@ void testCrossThreadUnsizedFree()
     releaser.join();
 
     void* p = MemoryPool::allocate(96);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     std::memset(p, 0x11, 96);
     MemoryPool::deallocate(p);
 
@@ -607,7 +649,7 @@ void testRemoteBatchPartialFlushOnThreadExit()
     for (int i = 0; i < kCount; ++i)
     {
         void* p = MemoryPool::allocate(64);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         ptrs.push_back(p);
     }
 
@@ -622,7 +664,7 @@ void testRemoteBatchPartialFlushOnThreadExit()
     for (int i = 0; i < kCount; ++i)
     {
         void* p = MemoryPool::allocate(64);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         static_cast<unsigned char*>(p)[0] = 0x22;
         MemoryPool::deallocate(p, 64);
     }
@@ -646,7 +688,7 @@ void testMultiConsumerRemoteFree()
             for (int i = 0; i < kPerProducer; ++i)
             {
                 void* p = MemoryPool::allocate(128);
-                assert(p != nullptr);
+                REQUIRE(p != nullptr);
                 bins[t].push_back(p);
             }
         });
@@ -668,7 +710,7 @@ void testMultiConsumerRemoteFree()
         th.join();
 
     void* p = MemoryPool::allocate(128);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     MemoryPool::deallocate(p, 128);
 
     std::cout << "Multi-consumer remote free test passed!" << std::endl;
@@ -679,17 +721,17 @@ void testCApiAlignedAndSizedFree()
     std::cout << "Running C API aligned / sized free test..." << std::endl;
 
     void* p = kama_alloc_aligned(100, 64);
-    assert(p != nullptr);
-    assert((reinterpret_cast<uintptr_t>(p) & 63) == 0);
+    REQUIRE(p != nullptr);
+    REQUIRE((reinterpret_cast<uintptr_t>(p) & 63) == 0);
     std::memset(p, 0x33, 100);
     kama_free_sized(p, 100);
 
     void* q = kama_alloc(256);
-    assert(q != nullptr);
+    REQUIRE(q != nullptr);
     kama_free_sized(q, 256);
 
-    assert(kama_alloc_aligned(32, 0) == nullptr);
-    assert(kama_alloc_aligned(32, 3) == nullptr);
+    REQUIRE(kama_alloc_aligned(32, 0) == nullptr);
+    REQUIRE(kama_alloc_aligned(32, 3) == nullptr);
 
     std::cout << "C API aligned / sized free test passed!" << std::endl;
 }
@@ -702,7 +744,7 @@ void testWrongSizeFreeRejectedWithGuards()
     std::cout << "Debug guards disabled, skipping." << std::endl;
 #else
     void* p = MemoryPool::allocate(64);
-    assert(p != nullptr);
+    REQUIRE(p != nullptr);
     // Wrong size class should be rejected; pointer remains allocated.
     MemoryPool::deallocate(p, 32);
     std::memset(p, 0x44, 64);
@@ -720,19 +762,19 @@ void testPageCacheCapAndReuse()
     for (int i = 0; i < 128; ++i)
     {
         void* p = MemoryPool::allocate(512 * 1024);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         ptrs.push_back(p);
     }
     for (void* p : ptrs)
         MemoryPool::deallocate(p);
 
     const MemoryPoolStats afterFree = MemoryPool::stats();
-    assert(afterFree.cachedPageBytes <= 64ull * 1024 * 1024);
+    REQUIRE(afterFree.cachedPageBytes <= 64ull * 1024 * 1024);
 
     for (int i = 0; i < 32; ++i)
     {
         void* p = MemoryPool::allocate(400 * 1024);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         MemoryPool::deallocate(p);
     }
 
@@ -747,9 +789,9 @@ void testAllocatorGrowthAndClear()
         std::vector<int, Allocator<int>> values;
         for (int i = 0; i < 10000; ++i)
             values.push_back(i);
-        assert(values.size() == 10000);
-        assert(values.front() == 0);
-        assert(values.back() == 9999);
+        REQUIRE(values.size() == 10000);
+        REQUIRE(values.front() == 0);
+        REQUIRE(values.back() == 9999);
         values.clear();
         values.shrink_to_fit();
     }
@@ -758,7 +800,7 @@ void testAllocatorGrowthAndClear()
         std::vector<std::pair<int, int>, Allocator<std::pair<int, int>>> pairs;
         for (int i = 0; i < 2000; ++i)
             pairs.emplace_back(i, i * 2);
-        assert(pairs.size() == 2000);
+        REQUIRE(pairs.size() == 2000);
     }
 
     std::cout << "Allocator growth / clear test passed!" << std::endl;
@@ -778,7 +820,7 @@ void testMixedSizedAndUnsizedTraffic()
     {
         const size_t size = 16 + (rng() % 512);
         void* p = MemoryPool::allocate(size);
-        assert(p != nullptr);
+        REQUIRE(p != nullptr);
         if (rng() & 1u)
             sized.emplace_back(p, size);
         else
@@ -791,6 +833,229 @@ void testMixedSizedAndUnsizedTraffic()
         MemoryPool::deallocate(p);
 
     std::cout << "Mixed sized/unsized traffic test passed!" << std::endl;
+}
+
+void testPageReuseThenUnsizedFree()
+{
+    std::cout << "Running page-reuse unsized free integrity test..." << std::endl;
+
+    std::vector<void*> small;
+    small.reserve(24000);
+    for (int i = 0; i < 24000; ++i)
+    {
+        void* p = MemoryPool::allocate(32);
+        REQUIRE(p != nullptr);
+        fillPattern(p, 32, static_cast<std::uint32_t>(i));
+        small.push_back(p);
+    }
+    for (int i = 0; i < 24000; ++i)
+    {
+        REQUIRE(checkPattern(small[static_cast<size_t>(i)], 32, static_cast<std::uint32_t>(i)));
+        MemoryPool::deallocate(small[static_cast<size_t>(i)]);
+    }
+    small.clear();
+
+    const size_t kBigger[] = {128, 512, 1024, 4096};
+    for (size_t size : kBigger)
+    {
+        std::vector<void*> blocks;
+        blocks.reserve(1500);
+        for (int i = 0; i < 1500; ++i)
+        {
+            void* p = MemoryPool::allocate(size);
+            REQUIRE(p != nullptr);
+            fillPattern(p, size, 0xA5000000u + static_cast<std::uint32_t>(size) + static_cast<std::uint32_t>(i));
+            blocks.push_back(p);
+        }
+        for (int i = 0; i < 1500; ++i)
+        {
+            REQUIRE(checkPattern(blocks[static_cast<size_t>(i)], size,
+                                 0xA5000000u + static_cast<std::uint32_t>(size) + static_cast<std::uint32_t>(i)));
+            MemoryPool::deallocate(blocks[static_cast<size_t>(i)]);
+        }
+    }
+
+    for (int i = 0; i < 4000; ++i)
+    {
+        void* p = MemoryPool::allocate(32);
+        REQUIRE(p != nullptr);
+        fillPattern(p, 32, 0x32u + static_cast<std::uint32_t>(i));
+        REQUIRE(checkPattern(p, 32, 0x32u + static_cast<std::uint32_t>(i)));
+        MemoryPool::deallocate(p);
+    }
+
+    std::cout << "Page-reuse unsized free integrity test passed!" << std::endl;
+}
+
+void testMultiThreadPayloadIntegrity()
+{
+    std::cout << "Running multi-thread payload integrity test..." << std::endl;
+
+    constexpr int kThreads = 8;
+    std::atomic<int> failures{0};
+
+    auto worker = [&failures](int tid) {
+        constexpr int kLocalOps = 6000;
+        std::mt19937 rng(static_cast<std::uint32_t>(0xC0DE0000u + tid));
+        std::vector<std::tuple<void*, size_t, std::uint32_t>> live;
+        live.reserve(1024);
+        for (int i = 0; i < kLocalOps; ++i)
+        {
+            const bool doFree = !live.empty() && ((rng() % 3u) != 0u);
+            if (doFree)
+            {
+                const size_t idx = rng() % live.size();
+                auto [ptr, size, seed] = live[idx];
+                if (!checkPattern(ptr, size, seed))
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                if ((rng() & 1u) != 0u)
+                    MemoryPool::deallocate(ptr, size);
+                else
+                    MemoryPool::deallocate(ptr);
+                live[idx] = live.back();
+                live.pop_back();
+            }
+            else
+            {
+                const size_t size = 8 + (rng() % 2048);
+                void* ptr = MemoryPool::allocate(size);
+                if (!ptr)
+                {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                const std::uint32_t seed = rng();
+                fillPattern(ptr, size, seed);
+                live.emplace_back(ptr, size, seed);
+            }
+        }
+        for (auto [ptr, size, seed] : live)
+        {
+            if (!checkPattern(ptr, size, seed))
+                failures.fetch_add(1, std::memory_order_relaxed);
+            MemoryPool::deallocate(ptr, size);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t)
+        threads.emplace_back(worker, t);
+    for (auto& th : threads)
+        th.join();
+
+    REQUIRE(failures.load() == 0);
+    std::cout << "Multi-thread payload integrity test passed!" << std::endl;
+}
+
+void testThreadChurn()
+{
+    std::cout << "Running thread-churn test..." << std::endl;
+
+    std::atomic<int> failures{0};
+    for (int wave = 0; wave < 24; ++wave)
+    {
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 8; ++t)
+        {
+            threads.emplace_back([&failures, wave, t]() {
+                std::vector<void*> ptrs;
+                ptrs.reserve(400);
+                for (int i = 0; i < 400; ++i)
+                {
+                    const size_t size = 16u << (static_cast<unsigned>(i + wave + t) % 8u);
+                    void* p = MemoryPool::allocate(size);
+                    if (!p)
+                    {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                    fillPattern(p, size, static_cast<std::uint32_t>(i + 1));
+                    ptrs.push_back(p);
+                }
+                for (int i = 0; i < 400; ++i)
+                {
+                    const size_t size = 16u << (static_cast<unsigned>(i + wave + t) % 8u);
+                    if (!checkPattern(ptrs[static_cast<size_t>(i)], size, static_cast<std::uint32_t>(i + 1)))
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                    MemoryPool::deallocate(ptrs[static_cast<size_t>(i)]);
+                }
+            });
+        }
+        for (auto& th : threads)
+            th.join();
+    }
+
+    REQUIRE(failures.load() == 0);
+    std::cout << "Thread-churn test passed!" << std::endl;
+}
+
+void testGrowCopyFree()
+{
+    std::cout << "Running grow-copy-free test..." << std::endl;
+
+    void* p = MemoryPool::allocate(16);
+    REQUIRE(p != nullptr);
+    fillPattern(p, 16, 1);
+    size_t cap = 16;
+    for (int step = 0; step < 12; ++step)
+    {
+        const size_t next = cap * 2;
+        void* q = MemoryPool::allocate(next);
+        REQUIRE(q != nullptr);
+        std::memcpy(q, p, cap);
+        REQUIRE(checkPattern(q, cap, 1));
+        fillPattern(q, next, 1);
+        MemoryPool::deallocate(p);
+        p = q;
+        cap = next;
+    }
+    REQUIRE(checkPattern(p, cap, 1));
+    MemoryPool::deallocate(p);
+    std::cout << "Grow-copy-free test passed!" << std::endl;
+}
+
+void testAlignedUnsizedFree()
+{
+    std::cout << "Running aligned unsized free test..." << std::endl;
+
+    for (size_t align : {16u, 32u, 64u, 128u})
+    {
+        void* p = MemoryPool::allocateAligned(96, align);
+        REQUIRE(p != nullptr);
+        REQUIRE((reinterpret_cast<std::uintptr_t>(p) & (align - 1)) == 0);
+        fillPattern(p, 96, static_cast<std::uint32_t>(align));
+        REQUIRE(checkPattern(p, 96, static_cast<std::uint32_t>(align)));
+        MemoryPool::deallocate(p);
+    }
+    std::cout << "Aligned unsized free test passed!" << std::endl;
+}
+
+void testExplicitTrim()
+{
+    std::cout << "Running explicit thread-cache trim test..." << std::endl;
+
+    std::vector<void*> ptrs;
+    ptrs.reserve(4096);
+    for (size_t i = 0; i < 4096; ++i)
+    {
+        void* p = MemoryPool::allocate(64);
+        REQUIRE(p != nullptr);
+        fillPattern(p, 64, static_cast<std::uint32_t>(i));
+        ptrs.push_back(p);
+    }
+    for (void* p : ptrs)
+        MemoryPool::deallocate(p, 64);
+
+    MemoryPool::trim();
+
+    void* probe = MemoryPool::allocate(64);
+    REQUIRE(probe != nullptr);
+    fillPattern(probe, 64, 0xCACEu);
+    REQUIRE(checkPattern(probe, 64, 0xCACEu));
+    MemoryPool::deallocate(probe, 64);
+
+    std::cout << "Explicit thread-cache trim test passed!" << std::endl;
 }
 
 int main() 
@@ -834,6 +1099,12 @@ int main()
         testStress();
         testMixedSizedAndUnsizedTraffic();
         testLongRandomTraffic();
+        testPageReuseThenUnsizedFree();
+        testMultiThreadPayloadIntegrity();
+        testThreadChurn();
+        testGrowCopyFree();
+        testAlignedUnsizedFree();
+        testExplicitTrim();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;

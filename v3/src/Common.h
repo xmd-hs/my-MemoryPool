@@ -200,8 +200,10 @@ public:
 
 void recordAllocation(size_t size);
 void recordFree(bool sized);
-void recordCentralRefill(size_t count);
-void recordCentralFlush(size_t count);
+void recordCentralRefill(size_t index, size_t count);
+void recordCentralFlush(size_t index, size_t count);
+void recordThreadCacheHit(size_t index);
+void recordThreadCacheMiss(size_t index);
 void recordRemoteFree(std::uint64_t count);
 
 } // namespace Kama_memoryPool

@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -228,13 +229,17 @@ void record(SuiteSummary& suite, BenchResult result)
 
 void printResult(const BenchResult& r)
 {
+    const double vsMallocX = (r.poolMs > 0.0) ? (r.mallocMs / r.poolMs) : 0.0;
+    const double vsNewX = (r.poolMs > 0.0) ? (r.newMs / r.poolMs) : 0.0;
     std::cout << "  " << std::left << std::setw(42) << r.name
               << std::right << std::fixed << std::setprecision(3)
               << " pool=" << std::setw(8) << r.poolMs
               << " new=" << std::setw(8) << r.newMs
               << " malloc=" << std::setw(8) << r.mallocMs
               << "  vs_new=" << verdictText(r.vsNew)
-              << " vs_malloc=" << verdictText(r.vsMalloc) << '\n';
+              << " vs_malloc=" << verdictText(r.vsMalloc)
+              << "  x_new=" << std::setprecision(2) << vsNewX
+              << " x_malloc=" << vsMallocX << '\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +533,63 @@ double runLargeObjects(Backend backend, FreeMode mode, size_t objectSize, size_t
     return timer.elapsedMs();
 }
 
+double runLargeObjectsPageTouch(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
+    Timer timer;
+    volatile unsigned checksum = 0;
+    const size_t stride = 4096;
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        auto* bytes = static_cast<unsigned char*>(ptr);
+        for (size_t offset = 0; offset < objectSize; offset += stride)
+        {
+            bytes[offset] = static_cast<unsigned char>(i + offset);
+            checksum += bytes[offset];
+        }
+        backendFree(backend, mode, ptr, objectSize);
+    }
+    (void)checksum;
+    return timer.elapsedMs();
+}
+
+double runLargeObjectsFullWrite(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
+    Timer timer;
+    volatile unsigned checksum = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        std::memset(ptr, static_cast<int>(i), objectSize);
+        checksum += static_cast<unsigned>(static_cast<unsigned char*>(ptr)[i % objectSize]);
+        backendFree(backend, mode, ptr, objectSize);
+    }
+    (void)checksum;
+    return timer.elapsedMs();
+}
+
+double runLargeObjectsCold(Backend backend, FreeMode mode, size_t objectSize, size_t count)
+{
+    Timer timer;
+    for (size_t i = 0; i < count; ++i)
+    {
+        void* ptr = backendAllocate(backend, objectSize);
+        if (!ptr)
+            continue;
+        auto* bytes = static_cast<unsigned char*>(ptr);
+        bytes[0] = static_cast<unsigned char>(i);
+        bytes[objectSize - 1] = static_cast<unsigned char>(i >> 8);
+        backendFree(backend, mode, ptr, objectSize);
+        if (backend == Backend::Pool)
+            MemoryPool::trim();
+    }
+    return timer.elapsedMs();
+}
+
 double runStlAllocator(Backend backend, size_t iterations)
 {
     // Direct Allocator / malloc traffic with the same sized pattern vector would
@@ -789,15 +851,75 @@ void runShapeSuite(SuiteSummary& suite, size_t repeats)
 
     {
         auto pool = measureMedian(repeats, [] {
-            return runStlAllocator(Backend::Pool, 4000);
+            return runLargeObjectsPageTouch(Backend::Pool, FreeMode::Sized, 512 * 1024, 100);
         });
         auto neu = measureMedian(repeats, [] {
-            return runStlAllocator(Backend::NewDelete, 4000);
+            return runLargeObjectsPageTouch(Backend::NewDelete, FreeMode::Sized, 512 * 1024, 100);
         });
         auto mal = measureMedian(repeats, [] {
-            return runStlAllocator(Backend::MallocFree, 4000);
+            return runLargeObjectsPageTouch(Backend::MallocFree, FreeMode::Sized, 512 * 1024, 100);
         });
-        auto r = makeResult("STL Allocator allocate(256 ints) x4000", pool, neu, mal);
+        auto r = makeResult("large-object 512KB page-touch x100", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLargeObjectsPageTouch(Backend::Pool, FreeMode::Sized, 2 * 1024 * 1024, 32);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLargeObjectsPageTouch(Backend::NewDelete, FreeMode::Sized, 2 * 1024 * 1024, 32);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLargeObjectsPageTouch(Backend::MallocFree, FreeMode::Sized, 2 * 1024 * 1024, 32);
+        });
+        auto r = makeResult("large-object 2MB page-touch x32", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLargeObjectsFullWrite(Backend::Pool, FreeMode::Sized, 2 * 1024 * 1024, 16);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLargeObjectsFullWrite(Backend::NewDelete, FreeMode::Sized, 2 * 1024 * 1024, 16);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLargeObjectsFullWrite(Backend::MallocFree, FreeMode::Sized, 2 * 1024 * 1024, 16);
+        });
+        auto r = makeResult("large-object 2MB full-write x16", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLargeObjectsCold(Backend::Pool, FreeMode::Sized, 512 * 1024, 64);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLargeObjectsCold(Backend::NewDelete, FreeMode::Sized, 512 * 1024, 64);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLargeObjectsCold(Backend::MallocFree, FreeMode::Sized, 512 * 1024, 64);
+        });
+        auto r = makeResult("large-object 512KB cold-trim x64", pool, neu, mal);
+        printResult(r);
+        record(suite, r);
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::Pool, 20000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::NewDelete, 20000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runStlAllocator(Backend::MallocFree, 20000);
+        });
+        auto r = makeResult("STL Allocator allocate(256 ints) x20000", pool, neu, mal);
         printResult(r);
         record(suite, r);
     }
@@ -875,6 +997,84 @@ double runChurnAllSizeClasses(Backend backend, FreeMode mode, size_t rounds)
 double runBurstUnsized(Backend backend, size_t threadCount, size_t perThread)
 {
     return runMultiThreaded(backend, FreeMode::Unsized, 0xA11u, threadCount, perThread);
+}
+
+double runLiveSetMix(Backend backend, FreeMode mode, size_t threadCount, size_t opsPerThread)
+{
+    constexpr std::array<size_t, 11> kSizes{16, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096};
+    constexpr size_t kLiveCap = 2048;
+
+    Timer timer;
+    std::vector<std::thread> threads;
+    threads.reserve(threadCount);
+    for (size_t tid = 0; tid < threadCount; ++tid)
+    {
+        threads.emplace_back([=]() {
+            std::mt19937 rng(0x51A7u + static_cast<unsigned>(tid) * 17u);
+            std::uniform_int_distribution<size_t> pick(0, kSizes.size() - 1);
+            std::vector<std::pair<void*, size_t>> live;
+            live.reserve(kLiveCap);
+            for (size_t op = 0; op < opsPerThread; ++op)
+            {
+                const bool mustFree = live.size() >= kLiveCap;
+                const bool doFree = mustFree || (!live.empty() && (rng() & 1u));
+                if (doFree)
+                {
+                    const size_t idx = rng() % live.size();
+                    backendFree(backend, mode, live[idx].first, live[idx].second);
+                    live[idx] = live.back();
+                    live.pop_back();
+                }
+                else
+                {
+                    const size_t size = kSizes[pick(rng)];
+                    void* ptr = backendAllocate(backend, size);
+                    if (!ptr)
+                        continue;
+                    touch(ptr, size, op);
+                    live.emplace_back(ptr, size);
+                }
+            }
+            for (const auto& item : live)
+                backendFree(backend, mode, item.first, item.second);
+        });
+    }
+    for (auto& th : threads)
+        th.join();
+    return timer.elapsedMs();
+}
+
+void runUsageSuite()
+{
+    std::cout << "\n== Usage-like (kept-alive mixed sizes, informational) ==\n"
+              << "  Not counted in PASS/FAIL; this is closer to app traffic than alloc/free bursts.\n";
+
+    constexpr size_t repeats = 9;
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::Pool, FreeMode::Sized, 4, 80000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::NewDelete, FreeMode::Sized, 4, 80000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::MallocFree, FreeMode::Sized, 4, 80000);
+        });
+        printResult(makeResult("live-set 4T sized 16B-4KB x80000", pool, neu, mal));
+    }
+
+    {
+        auto pool = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::Pool, FreeMode::Unsized, 4, 80000);
+        });
+        auto neu = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::NewDelete, FreeMode::Unsized, 4, 80000);
+        });
+        auto mal = measureMedian(repeats, [] {
+            return runLiveSetMix(Backend::MallocFree, FreeMode::Unsized, 4, 80000);
+        });
+        printResult(makeResult("live-set 4T unsized 16B-4KB x80000", pool, neu, mal));
+    }
 }
 
 void runAdversarialSuite(SuiteSummary& suite, size_t repeats)
@@ -1009,14 +1209,48 @@ void runScalabilityMatrix(SuiteSummary& suite)
 
 void printMemoryFootprint()
 {
+    const MemoryPoolStats beforeTrim = MemoryPool::stats();
+    MemoryPool::trim();
     const MemoryPoolStats stats = MemoryPool::stats();
     std::cout << "\n== Pool memory footprint ==\n"
+              << "  trimCachedPageBytes=" << beforeTrim.cachedPageBytes
+              << " -> " << stats.cachedPageBytes << '\n'
               << "  reservedBytes=" << stats.reservedBytes
               << " (" << std::fixed << std::setprecision(2)
               << (stats.reservedBytes / (1024.0 * 1024.0)) << " MiB)\n"
               << "  cachedPageBytes=" << stats.cachedPageBytes
               << " (" << (stats.cachedPageBytes / (1024.0 * 1024.0)) << " MiB)\n"
-              << "  page-cache cap ~= 64 MiB\n";
+              << "  page-cache cap ~= 64 MiB\n"
+              << "  allocs=" << stats.allocCount
+              << " frees=" << stats.freeCount
+              << " live=" << stats.liveAllocs << '\n'
+              << "  smallAllocs=" << stats.smallAllocCount
+              << " largeAllocs=" << stats.largeAllocCount
+              << " sizedFrees=" << stats.sizedFreeCount
+              << " unsizedFrees=" << stats.unsizedFreeCount << '\n'
+              << "  centralRefillBlocks=" << stats.centralRefillCount
+              << " centralFlushBlocks=" << stats.centralFlushCount << '\n'
+              << "  centralLockWaits=" << stats.centralLockWaits
+              << " remoteFreeBlocks=" << stats.remoteFreeCount << '\n';
+    if (stats.remoteFreeCount == 0)
+        std::cout << "  diagnostic: remote-free path was not observed in this run; "
+                     "use an ownership-transfer workload before tuning it.\n";
+    std::cout << "  centralByClass:";
+    for (size_t i = 0; i < stats.centralRefillByClass.size(); ++i)
+    {
+        if (stats.centralRefillByClass[i] || stats.centralFlushByClass[i])
+            std::cout << " [" << i << ":r=" << stats.centralRefillByClass[i]
+                      << ",f=" << stats.centralFlushByClass[i] << "]";
+    }
+    std::cout << '\n';
+    std::cout << "  threadCacheByClass:";
+    for (size_t i = 0; i < stats.threadCacheHitByClass.size(); ++i)
+    {
+        if (stats.threadCacheHitByClass[i] || stats.threadCacheMissByClass[i])
+            std::cout << " [" << i << ":h=" << stats.threadCacheHitByClass[i]
+                      << ",m=" << stats.threadCacheMissByClass[i] << "]";
+    }
+    std::cout << '\n';
 }
 
 void printSuiteSummary(const SuiteSummary& suite)
@@ -1060,6 +1294,7 @@ int main()
     runOwnershipSuite(suite, kRepeats);
     runShapeSuite(suite, kRepeats);
     runAdversarialSuite(suite, kRepeats);
+    runUsageSuite();
     runScalabilityMatrix(suite);
     printMemoryFootprint();
     printSuiteSummary(suite);

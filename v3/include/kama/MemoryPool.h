@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <new>
 #include <utility>
+#include <array>
 
 namespace Kama_memoryPool
 {
@@ -30,6 +31,10 @@ struct MemoryPoolStats
     std::uint64_t remoteFreeCount{0};
     std::uint64_t reservedBytes{0};
     std::uint64_t cachedPageBytes{0};
+    std::array<std::uint64_t, 96> centralRefillByClass{};
+    std::array<std::uint64_t, 96> centralFlushByClass{};
+    std::array<std::uint64_t, 96> threadCacheHitByClass{};
+    std::array<std::uint64_t, 96> threadCacheMissByClass{};
 };
 
 class KAMA_API MemoryPool
@@ -39,6 +44,8 @@ public:
     static void* allocateAligned(std::size_t size, std::size_t alignment);
     static void deallocate(void* ptr);
     static void deallocate(void* ptr, std::size_t size);
+    // Return excess current-thread cache entries during an idle period.
+    static void trim();
     static MemoryPoolStats stats();
 
     template<typename T, typename... Args>

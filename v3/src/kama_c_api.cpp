@@ -23,4 +23,9 @@ void kama_free_sized(void* ptr, size_t size)
     Kama_memoryPool::MemoryPool::deallocate(ptr, size);
 }
 
+void kama_trim(void)
+{
+    Kama_memoryPool::MemoryPool::trim();
+}
+
 }

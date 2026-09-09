@@ -15,6 +15,12 @@ option(KAMA_MEMORY_POOL_ENABLE_STATS "Enable global allocation statistics (adds 
 option(KAMA_MEMORY_POOL_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(KAMA_MEMORY_POOL_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(KAMA_MEMORY_POOL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(KAMA_MEMORY_POOL_PROFILE "Enable low-overhead allocation diagnostics" OFF)
+
+if(KAMA_MEMORY_POOL_PROFILE)
+    set(KAMA_MEMORY_POOL_ENABLE_STATS ON CACHE BOOL "Enable global allocation statistics" FORCE)
+    message(STATUS "MemoryPool profile diagnostics enabled (stats on)")
+endif()
 
 if(MSVC)
     add_compile_options(/W4 /utf-8)
