@@ -8,6 +8,7 @@
 
 namespace Kama_memoryPool
 {
+static std::atomic<size_t> g_largeCacheLimitBytes{8 * 1024 * 1024};
 
 namespace
 {
@@ -22,7 +23,7 @@ size_t lookupSizeClass(void* ptr)
     return PageCache::getInstance().findSizeClass(ptr);
 }
 
-#if defined(__APPLE__)
+#if 0
 constexpr size_t kRemoteBatchLimit = 64;
 #else
 constexpr size_t kRemoteBatchLimit = 128;
@@ -36,11 +37,28 @@ struct LocalLargeCache
     static constexpr size_t kMaxCachedBytes = 8 * 1024 * 1024;
 
     Span* head = nullptr;
+    // Fast exact-size bins for the common 512KiB/1MiB/2MiB network buffers.
+    Span* hot[3] = {nullptr, nullptr, nullptr};
     size_t count = 0;
     size_t bytes = 0;
 
+    static size_t hotIndex(size_t pages)
+    {
+        return pages == 128 ? 0 : (pages == 256 ? 1 : (pages == 512 ? 2 : 3));
+    }
+
     Span* take(size_t numPages)
     {
+        const size_t i = hotIndex(numPages);
+        if (i < 3 && hot[i])
+        {
+            Span* span = hot[i];
+            hot[i] = span->next;
+            span->next = nullptr;
+            --count;
+            bytes -= span->numPages * PageCache::pageSize();
+            return span;
+        }
         Span** link = &head;
         while (*link)
         {
@@ -65,8 +83,10 @@ struct LocalLargeCache
         const size_t spanBytes = span->numPages * PageCache::pageSize();
         if (spanBytes > kMaxCachedBytes || bytes > kMaxCachedBytes - spanBytes)
             return false;
-        span->next = head;
-        head = span;
+        const size_t i = hotIndex(span->numPages);
+        span->next = i < 3 ? hot[i] : head;
+        if (i < 3) hot[i] = span;
+        else head = span;
         ++count;
         bytes += spanBytes;
         return true;
@@ -74,6 +94,12 @@ struct LocalLargeCache
 
     void flush()
     {
+        for (size_t i = 0; i < 3; ++i)
+            while (hot[i])
+            {
+                Span* span = hot[i]; hot[i] = span->next; span->next = nullptr;
+                PageCache::getInstance().deallocateSpan(span);
+            }
         while (head)
         {
             Span* span = head;
@@ -87,6 +113,7 @@ struct LocalLargeCache
 };
 
 thread_local LocalLargeCache g_localLargeCache{};
+thread_local Span* g_lastLargeSpan = nullptr;
 
 size_t debugBlockIndex(const Span* span, const void* ptr)
 {
@@ -114,7 +141,7 @@ size_t debugBlockIndex(const Span* span, const void* ptr)
 
 bool debugMarkAllocated(Span* span, void* ptr)
 {
-    if constexpr (!kDebugGuardsEnabled)
+    if (!kDebugGuardsEnabled)
         return true;
     if (!span || span->isLarge)
         return true;
@@ -131,7 +158,7 @@ bool debugMarkAllocated(Span* span, void* ptr)
 
 bool debugValidateAndMarkFreed(Span* span, void* ptr, size_t expectedIndex)
 {
-    if constexpr (!kDebugGuardsEnabled)
+    if (!kDebugGuardsEnabled)
         return true;
     if (!span)
         return false;
@@ -173,6 +200,7 @@ void* allocateLargeObject(size_t size)
         span->next = nullptr;
         span->debugAllocMap.clear();
         span->debugLargeAllocated = true;
+        g_lastLargeSpan = span;
         return span->pageAddr;
     }
 
@@ -187,6 +215,7 @@ void* allocateLargeObject(size_t size)
     span->next = nullptr;
     span->debugAllocMap.clear();
     span->debugLargeAllocated = true;
+    g_lastLargeSpan = span;
     return span->pageAddr;
 }
 
@@ -215,33 +244,12 @@ ThreadCache::ThreadCache()
 {
     freeList_.fill(nullptr);
     freeListSize_.fill(0);
-    remoteBatch_.fill(nullptr);
-    remoteBatchSize_.fill(0);
 }
 
 ThreadCache::~ThreadCache()
 {
     flushAll();
     g_localLargeCache.flush();
-}
-
-void ThreadCache::flushRemoteBatch(size_t index)
-{
-    if (index >= FREE_LIST_SIZE || !remoteBatch_[index] || remoteBatchSize_[index] == 0)
-        return;
-    CentralCache::getInstance().pushRemoteFreeRange(
-        remoteBatch_[index], remoteBatchSize_[index], index);
-    remoteBatch_[index] = nullptr;
-    remoteBatchSize_[index] = 0;
-}
-
-void ThreadCache::queueRemoteFree(void* ptr, size_t index)
-{
-    *reinterpret_cast<void**>(ptr) = remoteBatch_[index];
-    remoteBatch_[index] = ptr;
-    ++remoteBatchSize_[index];
-    if (remoteBatchSize_[index] >= kRemoteBatchLimit)
-        flushRemoteBatch(index);
 }
 
 void ThreadCache::flushAll()
@@ -254,7 +262,6 @@ void ThreadCache::flushAll()
             freeList_[i] = nullptr;
             freeListSize_[i] = 0;
         }
-        flushRemoteBatch(i);
     }
 }
 
@@ -262,7 +269,7 @@ size_t ThreadCache::maxCachedBlocks(size_t size) const
 {
     constexpr size_t kBaseCacheBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kBaseCacheBytes / std::max(size, ALIGNMENT));
-#if defined(__APPLE__)
+#if 0
     if (size <= 32) return 2048;
     if (size <= 64) return 1024;
     if (size <= 256) return 512;
@@ -290,7 +297,7 @@ size_t ThreadCache::getBatchNum(size_t size) const
 {
     constexpr size_t kMaxBatchBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kMaxBatchBytes / std::max(size, ALIGNMENT));
-#if defined(__APPLE__)
+#if 0
     if (size <= 32) n = std::min(n, size_t(256));
     else if (size <= 64) n = std::min(n, size_t(128));
     else if (size <= 256) n = std::min(n, size_t(64));
@@ -299,7 +306,7 @@ size_t ThreadCache::getBatchNum(size_t size) const
 #elif defined(__linux__)
     if (size <= 32) n = std::min(n, size_t(512));
     else if (size <= 64) n = std::min(n, size_t(256));
-    else if (size <= 256) n = std::min(n, size_t(128));
+    else if (size <= 256) n = std::min(n, size_t(256));
     else if (size <= 1024) n = std::min(n, size_t(32));
     else
     {
@@ -310,7 +317,7 @@ size_t ThreadCache::getBatchNum(size_t size) const
 #else
     if (size <= 32) n = std::min(n, size_t(512));
     else if (size <= 64) n = std::min(n, size_t(256));
-    else if (size <= 256) n = std::min(n, size_t(128));
+    else if (size <= 256) n = std::min(n, size_t(256));
     else if (size <= 1024) n = std::min(n, size_t(32));
     else
     {
@@ -352,7 +359,7 @@ void* ThreadCache::allocate(size_t size)
         --freeListSize_[index];
         if (next)
             KAMA_PREFETCH(next);
-        if constexpr (kDebugGuardsEnabled)
+        if (kDebugGuardsEnabled)
         {
             Span* span = PageCache::getInstance().findSpan(ptr);
             if (!debugMarkAllocated(span, ptr))
@@ -393,7 +400,7 @@ bool ThreadCache::deallocate(void* ptr)
     const size_t mappedClass = lookupSizeClass(ptr);
     if (mappedClass < FREE_LIST_SIZE)
     {
-        if constexpr (kDebugGuardsEnabled)
+        if (kDebugGuardsEnabled)
         {
             Span* span = PageCache::getInstance().findSpan(ptr);
             if (!debugValidateAndMarkFreed(span, ptr, mappedClass))
@@ -429,7 +436,9 @@ bool ThreadCache::deallocate(void* ptr, size_t size)
 
     if (size >= MAX_BYTES)
     {
-        Span* span = PageCache::getInstance().findLargeSpan(ptr);
+        Span* span = (g_lastLargeSpan && g_lastLargeSpan->pageAddr == ptr &&
+                      g_lastLargeSpan->isLarge) ? g_lastLargeSpan :
+                      PageCache::getInstance().findLargeSpan(ptr);
         if (!span)
             span = PageCache::getInstance().findSpan(ptr);
         if (!span || !span->isLarge)
@@ -443,7 +452,7 @@ bool ThreadCache::deallocate(void* ptr, size_t size)
     if (index >= FREE_LIST_SIZE)
         return deallocate(ptr);
 
-    if constexpr (kDebugGuardsEnabled)
+    if (kDebugGuardsEnabled)
     {
         Span* span = PageCache::getInstance().findSpan(ptr);
         if (!debugValidateAndMarkFreed(span, ptr, index))
@@ -459,9 +468,26 @@ void ThreadCache::trim()
         if (shouldReturnToCentralCache(index))
             returnToCentralCache(index);
     }
-    // Explicit trim is an idle-point operation, so release retained large
-    // spans as well. The destructor keeps the same full-flush behavior.
+    // Keep the hot large-object cache across trim calls.  Network workloads
+    // commonly call trim as a lightweight checkpoint; flushing a 512KiB span
+    // on every checkpoint adds a page-cache lock and defeats reuse.  The
+    // stronger releaseUnused() API still flushes it and returns pages.
+}
+
+void ThreadCache::releaseUnused()
+{
+    flushAll();
     g_localLargeCache.flush();
+}
+
+void ThreadCache::setLargeCacheLimit(size_t bytes)
+{
+    g_largeCacheLimitBytes.store(bytes, std::memory_order_relaxed);
+}
+
+size_t ThreadCache::largeCacheLimit()
+{
+    return g_largeCacheLimitBytes.load(std::memory_order_relaxed);
 }
 
 void* ThreadCache::fetchFromCentralCache(size_t index)
@@ -478,7 +504,7 @@ void* ThreadCache::fetchFromCentralCache(size_t index)
     freeListSize_[index] += fetchedCount > 0 ? fetchedCount - 1 : 0;
     if (fetchedCount > 0)
         recordCentralRefill(index, fetchedCount);
-    if constexpr (kDebugGuardsEnabled)
+    if (kDebugGuardsEnabled)
     {
         Span* span = PageCache::getInstance().findSpan(result);
         if (!debugMarkAllocated(span, result))

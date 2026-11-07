@@ -4,6 +4,7 @@ project(memory_pool)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC 开启 /W4 警告；GCC/Clang 开启 -Wall -O2
 if(MSVC)
     add_compile_options(/W4 /utf-8)
 else()
@@ -18,11 +19,13 @@ set(TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
 file(GLOB SOURCES "${SRC_DIR}/*.cpp")
 
+# 单元测试可执行文件
 add_executable(unit_test
     ${SOURCES}
     ${TEST_DIR}/UnitTest.cpp
 )
 
+# 性能测试可执行文件（需要 PerformanceTest.cpp 存在）
 add_executable(perf_test
     ${SOURCES}
     ${TEST_DIR}/PerformanceTest.cpp
@@ -34,12 +37,14 @@ target_include_directories(perf_test PRIVATE ${INC_DIR})
 target_link_libraries(unit_test PRIVATE Threads::Threads)
 target_link_libraries(perf_test PRIVATE Threads::Threads)
 
+# make test 运行单元测试
 add_custom_target(test
     COMMAND $<TARGET_FILE:unit_test>
     DEPENDS unit_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# make perf 运行性能测试
 add_custom_target(perf
     COMMAND $<TARGET_FILE:perf_test>
     DEPENDS perf_test

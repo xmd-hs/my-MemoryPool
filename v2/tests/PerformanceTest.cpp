@@ -170,7 +170,7 @@ public:
                   << " threads, " << ALLOCS_PER_THREAD << " allocations each):" 
                   << std::endl;
         
-        auto threadFunc = [](bool useMemPool) 
+        auto threadFunc = [ALLOCS_PER_THREAD](bool useMemPool) 
         {
             std::random_device rd;
             std::mt19937 gen(rd());

@@ -2,7 +2,7 @@
 
 # my-MemoryPool
 
-C++17 内存池。日常用 **v3**：线程本地缓存 → 按 size class 分片的中央缓存（含 lock-free Transfer）→ 页缓存，用来摊掉系统分配器调用和多线程锁竞争。
+C++14 内存池。日常用 **v3**：线程本地缓存 → 按 size class 分片的中央缓存（含 lock-free Transfer）→ 页缓存，用来摊掉系统分配器调用和多线程锁竞争。
 
 小对象覆盖 **8B–512KiB**。池里拿到的指针必须用本项目接口释放，不能和 `free` / `delete` 混用。非法输入返回 `nullptr`；`Allocator<T>` 把失败转成 `std::bad_alloc`。
 
@@ -25,6 +25,11 @@ public:
     static void  deallocate(void* ptr);                  // unsized
     static void  deallocate(void* ptr, std::size_t size); // sized，更快
     static void  trim();                                 // 只收当前线程多余缓存
+    static void  setPageCacheLimit(std::size_t bytes);   // 全局空闲页预算
+    static std::size_t pageCacheLimit();
+    static void  setLargeCacheLimit(std::size_t bytes);  // 每线程大对象预算
+    static std::size_t largeCacheLimit();
+    static void  releaseUnused();                        // 显式回收可用缓存
     static MemoryPoolStats stats();
 
     template<typename T, typename... Args>
@@ -75,6 +80,11 @@ void* kama_alloc_aligned(size_t size, size_t alignment);
 void  kama_free(void* ptr);
 void  kama_free_sized(void* ptr, size_t size);
 void  kama_trim(void);
+void  kama_set_page_cache_limit(size_t bytes);
+size_t kama_page_cache_limit(void);
+void  kama_set_large_cache_limit(size_t bytes);
+size_t kama_large_cache_limit(void);
+void  kama_release_unused(void);
 ```
 
 分别对应 `allocate` / `allocateAligned` / `deallocate` / `deallocate(ptr, size)` / `trim`。
@@ -139,16 +149,15 @@ flowchart TB
     D -->|批量补给 / 溢出 / 线程退出| E[CentralCache]
     E --> E1[size class x 8 分片]
     E --> E2[lock-free Transfer]
-    E --> E3[remote free 回收集成]
     E1 --> F[Span]
     F --> G[PageCache]
-    C -->|大对象或特殊对齐| H[TLS 大 span 缓存 上限 8MiB]
+    C -->|大对象或特殊对齐| H[TLS 大 span 缓存 默认 8MiB/线程]
     H -->|miss| G
     G --> I[VirtualAlloc / mmap]
     G --> J[三级 lock-free 基数页表]
 ```
 
-同线程小对象只在 ThreadCache 链表上 pop/push。中央层处理批量补给、Transfer 杂志和分片 steal。页层向系统申请/归还页，空闲页缓存上限约 64MiB。
+同线程小对象只在 ThreadCache 链表上 pop/push。跨线程释放进入执行释放线程的 ThreadCache，超水位或线程退出后通过 Transfer 供其他线程复用。中央层处理批量补给、Transfer 和分片 steal。页层向系统申请/归还页，默认空闲页预算 64MiB。
 
 ```mermaid
 flowchart TD
@@ -158,7 +167,7 @@ flowchart TD
     C --> D{TLS 有空闲块?}
     D -->|是| E[弹出并 prefetch 下一块]
     D -->|否| F[CentralCache.fetchRange]
-    F --> G[本分片 → Transfer → steal → merge remote → 新 span]
+    F --> G[本分片 → Transfer → steal → 新 span]
 ```
 
 ```mermaid
@@ -175,9 +184,15 @@ flowchart TD
 
 unsized free（只给指针）是相对 glibc 的关键路径：`blockSize <= 256` 的页在页尾写 `PageTag`，同页 O(1) 恢复 size class；失效再走无锁基数页表。
 
+### 缓存预算与回收
+
+MemoryPool::setPageCacheLimit 设置进程级空闲页预算，默认 64MiB；MemoryPool::setLargeCacheLimit 设置每线程大对象缓存预算，默认 8MiB。两个预算都接受 0，表示不保留对应缓存。降低页预算会立即释放完整空闲的系统申请段；部分空闲段仍有占用，不能归还，因此页预算是可回收部分的软上限。降低大对象预算立即约束调用线程，其他线程在下次使用该缓存时收缩。
+
+MemoryPool::releaseUnused 交出调用线程的全部空闲块和大对象缓存、排空当时可见的 Transfer 块，再归还 PageCache 中完整空闲的系统申请段。其他线程的 TLS 缓存与活动分配不会被强制回收；并发调用按尽力而为处理。原有 trim 仍只收缩调用线程的超水位缓存。C API 提供 kama_set_page_cache_limit、kama_set_large_cache_limit、kama_release_unused 及两个预算查询函数。
+
 ## 构建
 
-CMake 3.14+、C++17。未开 sanitizer 时 Release 会尝试打开 LTO/LTCG。
+CMake 3.14+、C++14。未开 sanitizer 时 Release 会尝试打开 LTO/LTCG。
 
 ```bash
 cmake -S v3 -B v3/build-release -DCMAKE_BUILD_TYPE=Release \
@@ -296,7 +311,7 @@ Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_
 ## 注意事项
 
 - 测速请关闭统计和 Debug Guards。发布前建议在目标平台跑 ASan、UBSan 或 TSan。
-- 页缓存上限约 64MiB，超出的完整 origin 还回系统。大对象本线程复用上限 8MiB。
+- 页缓存默认预算 64MiB，完整空闲 origin 可立即回收；大对象每线程默认预算 8MiB。预算可通过 API 调整。
 - `trim()` 只作用于当前线程，不是全局回收。
 - 默认关 Guards 时，错误 size / double free 仍可能破坏内部链表。
 - 仓库目前没有单独的许可证文件。

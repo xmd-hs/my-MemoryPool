@@ -1230,11 +1230,7 @@ void printMemoryFootprint()
               << " unsizedFrees=" << stats.unsizedFreeCount << '\n'
               << "  centralRefillBlocks=" << stats.centralRefillCount
               << " centralFlushBlocks=" << stats.centralFlushCount << '\n'
-              << "  centralLockWaits=" << stats.centralLockWaits
-              << " remoteFreeBlocks=" << stats.remoteFreeCount << '\n';
-    if (stats.remoteFreeCount == 0)
-        std::cout << "  diagnostic: remote-free path was not observed in this run; "
-                     "use an ownership-transfer workload before tuning it.\n";
+              << "  centralLockWaits=" << stats.centralLockWaits << std::endl;
     std::cout << "  centralByClass:";
     for (size_t i = 0; i < stats.centralRefillByClass.size(); ++i)
     {

@@ -1,3 +1,6 @@
+// v2 单元测试：覆盖基础分配、内存写入、多线程、边界、压力测试
+// 编译运行：mkdir build && cd build && cmake .. && cmake --build . && ./unit_test
+
 #include "../include/MemoryPool.h"
 #include <iostream>
 #include <vector>
@@ -68,7 +71,7 @@ void testMultiThreading()
     const int ALLOCS_PER_THREAD = 1000;
     std::atomic<bool> has_error{false};
     
-    auto threadFunc = [&has_error]() 
+    auto threadFunc = [&has_error, ALLOCS_PER_THREAD]() 
     {
         try 
         {

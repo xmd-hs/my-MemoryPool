@@ -637,12 +637,11 @@ void testCrossThreadUnsizedFree()
     std::cout << "Cross-thread unsized free test passed!" << std::endl;
 }
 
-void testRemoteBatchPartialFlushOnThreadExit()
+void testCrossThreadFreeOnThreadExit()
 {
-    std::cout << "Running remote-batch partial flush test..." << std::endl;
+    std::cout << "Running cross-thread free on thread-exit test..." << std::endl;
 
-    // Fewer than the remote batch limit so frees stay in the TLS buffer until
-    // the freeing thread exits and flushes the remainder.
+    // The freeing thread owns these blocks in its TLS cache until thread exit.
     constexpr int kCount = 40;
     std::vector<void*> ptrs;
     ptrs.reserve(kCount);
@@ -669,12 +668,12 @@ void testRemoteBatchPartialFlushOnThreadExit()
         MemoryPool::deallocate(p, 64);
     }
 
-    std::cout << "Remote-batch partial flush test passed!" << std::endl;
+    std::cout << "Cross-thread free on thread-exit test passed!" << std::endl;
 }
 
-void testMultiConsumerRemoteFree()
+void testMultiConsumerCrossThreadFree()
 {
-    std::cout << "Running multi-consumer remote free test..." << std::endl;
+    std::cout << "Running multi-consumer cross-thread free test..." << std::endl;
 
     constexpr int kProducers = 4;
     constexpr int kPerProducer = 512;
@@ -700,7 +699,7 @@ void testMultiConsumerRemoteFree()
     for (int t = 0; t < kProducers; ++t)
     {
         consumers.emplace_back([&bins, t, kProducers]() {
-            // Consumer t frees producer ((t+1)%N) blocks → forced remote path.
+            // Consumer t frees blocks produced by ((t+1)%N).
             const int src = (t + 1) % kProducers;
             for (void* p : bins[src])
                 MemoryPool::deallocate(p, 128);
@@ -713,7 +712,7 @@ void testMultiConsumerRemoteFree()
     REQUIRE(p != nullptr);
     MemoryPool::deallocate(p, 128);
 
-    std::cout << "Multi-consumer remote free test passed!" << std::endl;
+    std::cout << "Multi-consumer cross-thread free test passed!" << std::endl;
 }
 
 void testCApiAlignedAndSizedFree()
@@ -905,7 +904,10 @@ void testMultiThreadPayloadIntegrity()
             if (doFree)
             {
                 const size_t idx = rng() % live.size();
-                auto [ptr, size, seed] = live[idx];
+                const auto item = live[idx];
+                void* ptr = std::get<0>(item);
+                const size_t size = std::get<1>(item);
+                const std::uint32_t seed = std::get<2>(item);
                 if (!checkPattern(ptr, size, seed))
                     failures.fetch_add(1, std::memory_order_relaxed);
                 if ((rng() & 1u) != 0u)
@@ -929,8 +931,11 @@ void testMultiThreadPayloadIntegrity()
                 live.emplace_back(ptr, size, seed);
             }
         }
-        for (auto [ptr, size, seed] : live)
+        for (const auto& item : live)
         {
+            void* ptr = std::get<0>(item);
+            const size_t size = std::get<1>(item);
+            const std::uint32_t seed = std::get<2>(item);
             if (!checkPattern(ptr, size, seed))
                 failures.fetch_add(1, std::memory_order_relaxed);
             MemoryPool::deallocate(ptr, size);
@@ -1058,6 +1063,93 @@ void testExplicitTrim()
     std::cout << "Explicit thread-cache trim test passed!" << std::endl;
 }
 
+void testCacheBudgetsAndReclamation()
+{
+    std::cout << "Running cache budget / reclamation test..." << std::endl;
+    constexpr size_t MiB = 1024 * 1024;
+    const size_t oldPageLimit = MemoryPool::pageCacheLimit();
+    const size_t oldLargeLimit = MemoryPool::largeCacheLimit();
+
+    kama_set_page_cache_limit(128 * MiB);
+    kama_set_large_cache_limit(0);
+    REQUIRE(kama_page_cache_limit() == 128 * MiB);
+    REQUIRE(kama_large_cache_limit() == 0);
+    MemoryPool::releaseUnused();
+
+    void* active = MemoryPool::allocate(24 * MiB);
+    void* idle = MemoryPool::allocate(24 * MiB);
+    REQUIRE(active != nullptr && idle != nullptr);
+    fillPattern(active, 64, 0xCAFEu);
+    MemoryPool::deallocate(idle, 24 * MiB);
+    const auto cached = MemoryPool::stats();
+    REQUIRE(cached.cachedPageBytes >= 24 * MiB);
+
+    MemoryPool::setPageCacheLimit(0);
+    const auto limited = MemoryPool::stats();
+    REQUIRE(limited.cachedPageBytes + 24 * MiB <= cached.cachedPageBytes);
+    REQUIRE(checkPattern(active, 64, 0xCAFEu));
+    REQUIRE(limited.reservedBytes >= 24 * MiB);
+
+    MemoryPool::setPageCacheLimit(128 * MiB);
+    void* idleAgain = MemoryPool::allocate(24 * MiB);
+    REQUIRE(idleAgain != nullptr);
+    MemoryPool::deallocate(idleAgain, 24 * MiB);
+    const auto beforeRelease = MemoryPool::stats();
+    kama_release_unused();
+    const auto afterRelease = MemoryPool::stats();
+    REQUIRE(afterRelease.cachedPageBytes + 24 * MiB <= beforeRelease.cachedPageBytes);
+    REQUIRE(checkPattern(active, 64, 0xCAFEu));
+
+    MemoryPool::deallocate(active, 24 * MiB);
+    MemoryPool::setPageCacheLimit(oldPageLimit);
+    MemoryPool::setLargeCacheLimit(oldLargeLimit);
+    MemoryPool::releaseUnused();
+    std::cout << "Cache budget / reclamation test passed!" << std::endl;
+}
+
+void testConcurrentCacheReclamation()
+{
+    std::cout << "Running concurrent cache reclamation test..." << std::endl;
+    const size_t oldPageLimit = MemoryPool::pageCacheLimit();
+    const size_t oldLargeLimit = MemoryPool::largeCacheLimit();
+    MemoryPool::setLargeCacheLimit(0);
+    std::atomic<bool> start{false};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 4; ++t)
+    {
+        workers.emplace_back([&start, t]() {
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            for (int i = 0; i < 1000; ++i)
+            {
+                const size_t size = i % 40 == 0 ? 1 * 1024 * 1024 : 64;
+                void* p = MemoryPool::allocate(size);
+                REQUIRE(p != nullptr);
+                fillPattern(p, 64, static_cast<std::uint32_t>(t * 1000 + i));
+                REQUIRE(checkPattern(p, 64, static_cast<std::uint32_t>(t * 1000 + i)));
+                MemoryPool::deallocate(p, size);
+            }
+        });
+    }
+    std::thread maintainer([&start]() {
+        while (!start.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        for (int i = 0; i < 80; ++i)
+        {
+            MemoryPool::setPageCacheLimit(i % 2 == 0 ? 0 : 8 * 1024 * 1024);
+            MemoryPool::releaseUnused();
+        }
+    });
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers)
+        worker.join();
+    maintainer.join();
+    MemoryPool::setPageCacheLimit(oldPageLimit);
+    MemoryPool::setLargeCacheLimit(oldLargeLimit);
+    MemoryPool::releaseUnused();
+    std::cout << "Concurrent cache reclamation test passed!" << std::endl;
+}
+
 int main() 
 {
     try 
@@ -1084,8 +1176,8 @@ int main()
         testThreadExitReturnsMemory();
         testCrossThreadSizedFree();
         testCrossThreadUnsizedFree();
-        testRemoteBatchPartialFlushOnThreadExit();
-        testMultiConsumerRemoteFree();
+        testCrossThreadFreeOnThreadExit();
+        testMultiConsumerCrossThreadFree();
 
         // Lifetime / cache / guards
         testLargeSpanLifetime();
@@ -1105,6 +1197,8 @@ int main()
         testGrowCopyFree();
         testAlignedUnsizedFree();
         testExplicitTrim();
+        testCacheBudgetsAndReclamation();
+        testConcurrentCacheReclamation();
 
         std::cout << "All tests passed successfully!" << std::endl;
         return 0;

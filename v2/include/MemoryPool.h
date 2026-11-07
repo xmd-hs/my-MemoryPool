@@ -1,3 +1,6 @@
+// MemoryPool 门面：对外只暴露 allocate / deallocate 两个接口
+// 实际工作全部委托给 ThreadCache（第一层），由它按需向下走 CentralCache → PageCache
+
 #pragma once
 #include "ThreadCache.h"
 

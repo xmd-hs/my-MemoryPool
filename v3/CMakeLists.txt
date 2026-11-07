@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(KamaMemoryPool VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
@@ -84,6 +84,7 @@ else()
 endif()
 
 add_library(KamaMemoryPool::memory_pool ALIAS kama_memory_pool)
+target_compile_features(kama_memory_pool PUBLIC cxx_std_14)
 
 target_include_directories(kama_memory_pool
     PUBLIC
