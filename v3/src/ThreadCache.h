@@ -12,11 +12,12 @@
 //   6. 命中本地链后预取下一块（KAMA_PREFETCH）；大对象路径用 KAMA_UNLIKELY
 //   7. 本地水位按档放大（32B 可囤 4096，不再是「32KB/块大小、上限 256」）
 //   8. 新增 allocateAligned：抬到块大小能被 alignment 整除的档，再复用 allocate
-//   9. 新增 trim()：峰值过后主动把超水位小对象/中对象和大对象本线程缓存交出去
+//   9. trim() 仅处理超水位小对象；releaseUnused() 执行强制回收
 
 #pragma once                             // 头文件只包含一次
 #include "Common.h"                      // 包含公共定义
 #include <array>                         // 包含 std::array
+#include <cstdint>
 
 namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
 {                                        // 命名空间开始
@@ -43,7 +44,7 @@ public:                                  // 公有接口开始
     // 带大小释放。大于等于 512KB 找回大对象 Span；否则按字节数换档后走 freeSmall
     bool  deallocate(void* ptr, size_t size); // 带大小地释放一块内存
 
-    // 空闲点回收。超水位小对象/中对象推 Transfer，并清空大对象本线程缓存
+    // 轻量整理当前线程的小对象缓存；不清空大对象缓存
     void  trim();                        // 主动收缩本线程缓存
     void  releaseUnused();               // 交出本线程全部空闲块与大对象缓存
     static void setLargeCacheLimit(size_t bytes); // 进程范围设置每线程大对象缓存预算
@@ -80,6 +81,7 @@ private:                                 // 私有成员开始
     // 每档一条空闲块链表（块里前 8 字节存 next），不是 span
     std::array<void*, FREE_LIST_SIZE> freeList_{}; // 每档一条空闲块链表头
     std::array<size_t, FREE_LIST_SIZE> freeListSize_{}; // 每档当前有多少个空闲块
+    std::array<std::uint16_t, FREE_LIST_SIZE> cacheLimit_{};
 };                                       // 类结束
 
 } // Kama_memoryPool 命名空间结束

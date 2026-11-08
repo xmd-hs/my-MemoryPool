@@ -23,32 +23,44 @@ size_t lookupSizeClass(void* ptr)
     return PageCache::getInstance().findSizeClass(ptr);
 }
 
-#if 0
-constexpr size_t kRemoteBatchLimit = 64;
-#else
-constexpr size_t kRemoteBatchLimit = 128;
-#endif
-
 struct LocalLargeCache
 {
-    // Bound retained memory rather than span count. A count-only cap can
-    // retain an unexpectedly large amount of address space when large spans
-    // are used repeatedly.
-    static constexpr size_t kMaxCachedBytes = 8 * 1024 * 1024;
-
     Span* head = nullptr;
-    // Fast exact-size bins for the common 512KiB/1MiB/2MiB network buffers.
     Span* hot[3] = {nullptr, nullptr, nullptr};
     size_t count = 0;
     size_t bytes = 0;
 
     static size_t hotIndex(size_t pages)
     {
-        return pages == 128 ? 0 : (pages == 256 ? 1 : (pages == 512 ? 2 : 3));
+        const size_t bytes = pages * PageCache::pageSize();
+        return bytes == 512 * 1024 ? 0 :
+               (bytes == 1024 * 1024 ? 1 : (bytes == 2 * 1024 * 1024 ? 2 : 3));
+    }
+
+    void shrink(size_t limit)
+    {
+        while (bytes > limit)
+        {
+            Span** list = &head;
+            if (!*list)
+            {
+                for (size_t i = 0; i < 3; ++i)
+                    if (hot[i]) { list = &hot[i]; break; }
+            }
+            Span* span = *list;
+            *list = span->next;
+            span->next = nullptr;
+            --count;
+            bytes -= span->numPages * PageCache::pageSize();
+            PageCache::getInstance().deallocateSpan(span);
+        }
     }
 
     Span* take(size_t numPages)
     {
+        const size_t limit = g_largeCacheLimitBytes.load(std::memory_order_relaxed);
+        if (bytes > limit)
+            shrink(limit);
         const size_t i = hotIndex(numPages);
         if (i < 3 && hot[i])
         {
@@ -80,8 +92,11 @@ struct LocalLargeCache
     {
         if (!span)
             return false;
+        const size_t limit = g_largeCacheLimitBytes.load(std::memory_order_relaxed);
+        if (bytes > limit)
+            shrink(limit);
         const size_t spanBytes = span->numPages * PageCache::pageSize();
-        if (spanBytes > kMaxCachedBytes || bytes > kMaxCachedBytes - spanBytes)
+        if (spanBytes > limit || bytes > limit - spanBytes)
             return false;
         const size_t i = hotIndex(span->numPages);
         span->next = i < 3 ? hot[i] : head;
@@ -94,26 +109,11 @@ struct LocalLargeCache
 
     void flush()
     {
-        for (size_t i = 0; i < 3; ++i)
-            while (hot[i])
-            {
-                Span* span = hot[i]; hot[i] = span->next; span->next = nullptr;
-                PageCache::getInstance().deallocateSpan(span);
-            }
-        while (head)
-        {
-            Span* span = head;
-            head = span->next;
-            span->next = nullptr;
-            PageCache::getInstance().deallocateSpan(span);
-        }
-        count = 0;
-        bytes = 0;
+        shrink(0);
     }
 };
 
 thread_local LocalLargeCache g_localLargeCache{};
-thread_local Span* g_lastLargeSpan = nullptr;
 
 size_t debugBlockIndex(const Span* span, const void* ptr)
 {
@@ -200,7 +200,6 @@ void* allocateLargeObject(size_t size)
         span->next = nullptr;
         span->debugAllocMap.clear();
         span->debugLargeAllocated = true;
-        g_lastLargeSpan = span;
         return span->pageAddr;
     }
 
@@ -215,7 +214,6 @@ void* allocateLargeObject(size_t size)
     span->next = nullptr;
     span->debugAllocMap.clear();
     span->debugLargeAllocated = true;
-    g_lastLargeSpan = span;
     return span->pageAddr;
 }
 
@@ -244,6 +242,8 @@ ThreadCache::ThreadCache()
 {
     freeList_.fill(nullptr);
     freeListSize_.fill(0);
+    for (size_t i = 0; i < FREE_LIST_SIZE; ++i)
+        cacheLimit_[i] = static_cast<std::uint16_t>(maxCachedBlocks(SizeClass::getSize(i)));
 }
 
 ThreadCache::~ThreadCache()
@@ -269,41 +269,24 @@ size_t ThreadCache::maxCachedBlocks(size_t size) const
 {
     constexpr size_t kBaseCacheBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kBaseCacheBytes / std::max(size, ALIGNMENT));
-#if 0
-    if (size <= 32) return 2048;
-    if (size <= 64) return 1024;
-    if (size <= 256) return 512;
-    if (size <= 1024) return 128;
-    if (size <= 4096) return 256;
-    return std::min(n, size_t(64));
-#else
     if (size <= 32) return 4096;
     if (size <= 64) return 2048;
     if (size <= 256) return 1024;
     if (size <= 1024) return 256;
     if (size <= 4096) return 512;
-    // Cover the 256-live scalability batch so 64KB-class allocs stay in TLS.
-    if (size <= 64 * 1024) return 256;
+    if (size <= 64 * 1024) return 64;
     return std::min(n, size_t(128));
-#endif
 }
 
 bool ThreadCache::shouldReturnToCentralCache(size_t index) const
 {
-    return freeListSize_[index] > maxCachedBlocks(SizeClass::getSize(index));
+    return freeListSize_[index] > cacheLimit_[index];
 }
 
 size_t ThreadCache::getBatchNum(size_t size) const
 {
     constexpr size_t kMaxBatchBytes = 256 * 1024;
     size_t n = std::max(size_t(1), kMaxBatchBytes / std::max(size, ALIGNMENT));
-#if 0
-    if (size <= 32) n = std::min(n, size_t(256));
-    else if (size <= 64) n = std::min(n, size_t(128));
-    else if (size <= 256) n = std::min(n, size_t(64));
-    else if (size <= 1024) n = std::min(n, size_t(24));
-    else n = std::min(n, size_t(12));
-#elif defined(__linux__)
     if (size <= 32) n = std::min(n, size_t(512));
     else if (size <= 64) n = std::min(n, size_t(256));
     else if (size <= 256) n = std::min(n, size_t(256));
@@ -314,18 +297,6 @@ size_t ThreadCache::getBatchNum(size_t size) const
         if (size >= 4096)
             n = std::max(n, size_t(8));
     }
-#else
-    if (size <= 32) n = std::min(n, size_t(512));
-    else if (size <= 64) n = std::min(n, size_t(256));
-    else if (size <= 256) n = std::min(n, size_t(256));
-    else if (size <= 1024) n = std::min(n, size_t(32));
-    else
-    {
-        n = std::min(n, size_t(32));
-        if (size >= 4096)
-            n = std::max(n, size_t(8));
-    }
-#endif
     return std::max(size_t(1), n);
 }
 
@@ -436,9 +407,7 @@ bool ThreadCache::deallocate(void* ptr, size_t size)
 
     if (size >= MAX_BYTES)
     {
-        Span* span = (g_lastLargeSpan && g_lastLargeSpan->pageAddr == ptr &&
-                      g_lastLargeSpan->isLarge) ? g_lastLargeSpan :
-                      PageCache::getInstance().findLargeSpan(ptr);
+        Span* span = PageCache::getInstance().findLargeSpan(ptr);
         if (!span)
             span = PageCache::getInstance().findSpan(ptr);
         if (!span || !span->isLarge)
@@ -483,6 +452,7 @@ void ThreadCache::releaseUnused()
 void ThreadCache::setLargeCacheLimit(size_t bytes)
 {
     g_largeCacheLimitBytes.store(bytes, std::memory_order_relaxed);
+    g_localLargeCache.shrink(bytes);
 }
 
 size_t ThreadCache::largeCacheLimit()
@@ -520,7 +490,7 @@ void ThreadCache::returnToCentralCache(size_t index)
         return;
 
     size_t keepNum = std::max(batchNum / 2, size_t(1));
-    keepNum = std::min(keepNum, maxCachedBlocks(SizeClass::getSize(index)));
+    keepNum = std::min(keepNum, static_cast<size_t>(cacheLimit_[index]));
     if (keepNum >= batchNum)
         return;
 

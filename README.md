@@ -52,8 +52,9 @@ void deleteElement(T* p);
 | `allocate(size)` | `size == 0` 按 8 字节处理；`size >= kMaxBytes` 走大对象 span |
 | `allocateAligned(size, alignment)` | `alignment` 必须是 2 的幂且非 0，否则 `nullptr`；`alignment <= 8` 时等同 `allocate` |
 | `deallocate(ptr)` | `ptr == nullptr` 为空操作；页尾 PageTag（≤256B）或基数页表恢复 size class |
-| `deallocate(ptr, size)` | 调用方提供 size，不查页表 |
-| `trim()` | 把当前线程超水位的小对象推到 Transfer，并清空本线程大 span 缓存；不扫描其他线程 |
+| `deallocate(ptr, size)` | 小对象按 size 归档；大对象仍需查找 Span 元数据 |
+| `trim()` | 轻量整理当前线程超水位的小对象；保留大对象热缓存 |
+| `releaseUnused()` | 交出当前线程缓存、排空 Transfer，并回收可释放的完整空闲页段 |
 | `stats()` | `reservedBytes` / `cachedPageBytes` 始终有效；其余计数需打开 `KAMA_MEMORY_POOL_ENABLE_STATS` |
 
 ### C++：`Allocator.h`
@@ -147,7 +148,7 @@ flowchart TB
     B --> C{大小与对齐}
     C -->|小于 512KiB| D[ThreadCache<br/>线程本地空闲链表]
     D -->|批量补给 / 溢出 / 线程退出| E[CentralCache]
-    E --> E1[size class x 8 分片]
+    E --> E1[size class x 16 分片]
     E --> E2[lock-free Transfer]
     E1 --> F[Span]
     F --> G[PageCache]
@@ -157,7 +158,7 @@ flowchart TB
     G --> J[三级 lock-free 基数页表]
 ```
 
-同线程小对象只在 ThreadCache 链表上 pop/push。跨线程释放进入执行释放线程的 ThreadCache，超水位或线程退出后通过 Transfer 供其他线程复用。中央层处理批量补给、Transfer 和分片 steal。页层向系统申请/归还页，默认空闲页预算 64MiB。
+同线程小对象只在 ThreadCache 链表上 pop/push。跨线程释放进入执行释放线程的 ThreadCache，超水位或线程退出后通过 Transfer 供其他线程复用。中央层处理批量补给、Transfer 和分片 steal。页层向系统申请/归还页，默认空闲页预算 32MiB。
 
 ```mermaid
 flowchart TD
@@ -186,7 +187,7 @@ unsized free（只给指针）是相对 glibc 的关键路径：`blockSize <= 25
 
 ### 缓存预算与回收
 
-MemoryPool::setPageCacheLimit 设置进程级空闲页预算，默认 64MiB；MemoryPool::setLargeCacheLimit 设置每线程大对象缓存预算，默认 8MiB。两个预算都接受 0，表示不保留对应缓存。降低页预算会立即释放完整空闲的系统申请段；部分空闲段仍有占用，不能归还，因此页预算是可回收部分的软上限。降低大对象预算立即约束调用线程，其他线程在下次使用该缓存时收缩。
+MemoryPool::setPageCacheLimit 设置进程级空闲页预算，默认 32MiB；MemoryPool::setLargeCacheLimit 设置每线程大对象缓存预算，默认 8MiB。两个预算都接受 0，表示不保留对应缓存。降低页预算会立即释放完整空闲的系统申请段；部分空闲段仍有占用，不能归还，因此页预算是可回收部分的软上限。降低大对象预算立即约束调用线程，其他线程在下次使用该缓存时收缩。
 
 MemoryPool::releaseUnused 交出调用线程的全部空闲块和大对象缓存、排空当时可见的 Transfer 块，再归还 PageCache 中完整空闲的系统申请段。其他线程的 TLS 缓存与活动分配不会被强制回收；并发调用按尽力而为处理。原有 trim 仍只收缩调用线程的超水位缓存。C API 提供 kama_set_page_cache_limit、kama_set_large_cache_limit、kama_release_unused 及两个预算查询函数。
 
@@ -214,17 +215,19 @@ cmake --build v3/build-release --config Release --target run_unit_tests
 cmake --build v3/build-release --config Release --target perf
 ```
 
-Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_perf -t kama-mp v3`。
+Linux：`bash v3/run_linux_quick.sh [build_dir]`，或 `docker build -f v3/Dockerfile.linux_perf -t kama-mp v3`。WSL 下可将 `build_dir` 指向 Linux 文件系统以避免跨文件系统构建开销。
 
 ## 测试
 
 `unit_test` 覆盖：小/中/大对象、size class 边界、对齐、非法输入、C API、STL Allocator、`newElement` 异常回滚、`trim`、多线程、跨线程 sized/unsized free、线程退出、页缓存上限、页复用后再 unsized、长随机压力。
 
-`perf_test` 对比 `MemoryPool` / `new[]+delete[]` / `malloc+free`。核心场景 9 次取中位数，可扩展矩阵 3 次取中位数。快于基线 5% 为 WIN，慢于 5% 为 LOSE，否则 TIE。对 new 和 malloc 各判一次；**任一 LOSE 则进程返回非 0**。
+`perf_test` 对比 `MemoryPool` / `new[]+delete[]` / `malloc+free`。目前有 **51 项计分比较与 1 项 trim 维护成本信息项**。核心场景 9 次取中位数，可扩展矩阵 3 次取中位数。快于基线 5% 为 WIN，慢于 5% 为 LOSE，否则 TIE。默认任一 LOSE 返回非 0；`perf_test --report` 只报告结果，CTest 使用此模式，避免将性能噪声当成正确性失败。
+
+`workload_bench [pool|malloc] [threads] [ops_per_thread]` 在独立进程运行混合尺寸、不同生命周期和有界跨线程释放队列，报告吞吐、采样 P50/P99、请求存活峰值、Linux RSS 及显式回收前后的预留量。比较两个后端时应使用相同参数，多次运行；RSS 与请求存活峰值不能直接相减作为碎片率。
 
 ## 性能数据
 
-以下为 **2026-09-07 本机单次套件输出**（提交 `2855c59`，未四舍五入），单位毫秒，越小越好。统计和 Debug Guards 关闭。换机器或负载后请自行跑 `perf_test`。
+以下表格为 **2026-09-07 历史套件输出**（提交 `2855c59`，未四舍五入），单位毫秒，越小越好。统计和 Debug Guards 关闭。换机器或负载后请自行跑当前版本的 `perf_test`。
 
 后续维护（`trim`、页标签收小、大对象 8MiB 字节上限等）没有改分配语义。Windows 上后来复测核心套件仍是 **48 WIN / 0 TIE / 0 LOSE**。
 
@@ -267,11 +270,15 @@ Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_
 | 4KB | 0.512 / 1.795 | 0.512 / 1.673 | 0.591 / 2.289 | 1.073 / 4.468 |
 | 64KB | 0.537 / 34.988 | 0.672 / 109.526 | 1.013 / 331.119 | 1.611 / 970.413 |
 
-### Linux / Ubuntu 22.04 / GCC Release + LTO（WSL，`-O3 -march=native`）
+### Linux / Ubuntu 22.04 / GCC Release + LTO（历史基准，WSL，`-O3 -march=native`）
 
 `unit_test` 通过。`perf_test`：**46 WIN / 2 TIE / 0 LOSE**。结束后 `reservedBytes=99876864`（95.25 MiB），`cachedPageBytes=65798144`（62.75 MiB）。
 
-两个 TIE 均未慢于系统：冷 512KB 对 `malloc` 为 0.001 vs 0.000；vector 扩容对 `new/delete` 为 1.441 vs 1.479（快约 2.6%，未过 5% 阈值）。
+上面的数据对应旧版测试与环境，不代表当前代码。2026-11-08 在 WSL2 / GCC 15 / C++14 Release + LTO 的当前代码上，两次 `perf_test --report` 分别得到 **45/4/2** 与 **46/3/2**（WIN/TIE/LOSE，51 项计分）；维护成本另报。微秒级场景和 5% 阈值易受噪声影响，不能据此宣称全场景领先。
+
+同环境下 `workload_bench` 8 线程、每线程 2000 万操作各运行三次：调整前 pool / malloc 吞吐中位数为 **23.84 / 22.43 Mops/s**，pool 峰值 RSS 中位数 **27.14 MiB**，malloc **11.88 MiB**。将页缓存默认预算从 64MiB 降至 32MiB、大于 4KB 且不超过 64KB 的每档线程缓存水位从 256 块降至 64 块后，pool 三次运行的吞吐中位数为 **26.73 Mops/s**，峰值 RSS 中位数为 **22.19 MiB**。调度和队列回退次数的波动较大，吞吐变化不能视为稳定提速；峰值 RSS 仍高于 malloc。pool 每次显式 `releaseUnused()` 后的预留量均为 **0 MiB**。
+
+下表保留旧版的场景示例，不作为当前代码的性能结论。
 
 | 场景 | v3 | new/delete | malloc/free | vs new | vs malloc |
 |---|---:|---:|---:|---|---|
@@ -311,7 +318,7 @@ Linux：`bash v3/run_linux_quick.sh`，或 `docker build -f v3/Dockerfile.linux_
 ## 注意事项
 
 - 测速请关闭统计和 Debug Guards。发布前建议在目标平台跑 ASan、UBSan 或 TSan。
-- 页缓存默认预算 64MiB，完整空闲 origin 可立即回收；大对象每线程默认预算 8MiB。预算可通过 API 调整。
+- 页缓存默认预算 32MiB，完整空闲 origin 可立即回收；大对象每线程默认预算 8MiB。预算可通过 API 调整。
 - `trim()` 只作用于当前线程，不是全局回收。
 - 默认关 Guards 时，错误 size / double free 仍可能破坏内部链表。
 - 仓库目前没有单独的许可证文件。

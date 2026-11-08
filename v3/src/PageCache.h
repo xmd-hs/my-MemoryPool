@@ -7,7 +7,7 @@
 //   大对象  ≥512KB             ：不切块，进 largeSpans_，不进页表
 // 小对象/中对象：allocateSpan 给中央去切块
 // 大对象：allocateLargeSpan
-// 归还：当初同一次向系统要来的相邻空闲 Span 才能合并；空闲页超过约 64MiB 且拼回当初那一整段则还给系统
+// 归还：同一 origin 的相邻空闲 Span 合并；完整空闲 origin 可按预算归还系统
 //
 // 相较于第二版的优化：
 //   1. 页大小改问系统，不再写死 4KB
@@ -16,7 +16,7 @@
 //   4. 按起始地址的表改成三级页表：任意页内指针都能无锁查到这段 Span
 //   5. 叶子槽打包 Span* + 档位，不带大小释放也可以走页表一次拿到档位
 //   6. Span 记下当初向系统要的起点 originAddr 和页数 originPages，合并只允许同一块内部相邻
-//   7. 空闲页上限约 64MiB，拼回当初向系统要的那一整段且超限则把虚存还回去（第二版运行中不还）
+//   7. 空闲页预算 32MiB，完整空闲 origin 可归还系统
 //   8. 大对象单独一张起始地址表，和页表分开，避免小对象/中对象不带大小释放去抢大对象那把锁
 //   9. Span 带切块字段 / centralShard / 调试位图，给中央和护栏用
 
@@ -224,7 +224,7 @@ private:                                 // 私有成员开始
     std::unordered_map<void*, Span*> largeSpans_; // 大对象表：起始地址 → Span*
     std::vector<std::pair<void*, size_t>> systemAllocs_; // 每次系统申请的（地址, 字节），析构要还
     size_t cachedFreePages_ = 0;         // 空闲链表上总共多少页
-    size_t cachedPageLimitBytes_ = 64 * 1024 * 1024; // 默认空闲页预算 64MiB
+    size_t cachedPageLimitBytes_ = 32 * 1024 * 1024; // 默认空闲页预算 32MiB
     std::mutex mutex_;                   // 页缓存全局锁（查小对象/中对象页表不走这把锁）
 };                                       // 类结束
 

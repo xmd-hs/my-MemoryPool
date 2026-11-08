@@ -2,6 +2,7 @@
 #include <kama/Allocator.h>
 #include <kama/kama_memory_pool.h>
 #include "Common.h"
+#include "PageCache.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1107,6 +1108,86 @@ void testCacheBudgetsAndReclamation()
     std::cout << "Cache budget / reclamation test passed!" << std::endl;
 }
 
+void testSplitLargeSpanReclamation()
+{
+    PageCache& cache = PageCache::getInstance();
+    const size_t oldLimit = cache.cachedPageLimit();
+    const size_t pageSize = PageCache::pageSize();
+    cache.setCachedPageLimit(0);
+    cache.releaseCachedPages();
+    const size_t baseline = cache.reservedBytes();
+    cache.setCachedPageLimit(16 * 1024 * 1024);
+
+    for (bool largeFirst : {true, false})
+    {
+        Span* origin = cache.allocateSpan(521);
+        REQUIRE(origin != nullptr);
+        REQUIRE(origin->pageAddr == origin->originAddr);
+        REQUIRE(origin->numPages == origin->originPages);
+        void* base = origin->pageAddr;
+        const size_t originPages = origin->numPages;
+        cache.deallocateSpan(origin);
+
+        Span* small = nullptr;
+        if (!largeFirst)
+        {
+            small = cache.allocateSpan(128);
+            REQUIRE(small != nullptr && small->pageAddr == base);
+        }
+        Span* large = cache.allocateLargeSpan(128);
+        REQUIRE(large != nullptr);
+        REQUIRE(cache.findSpan(large->pageAddr) == nullptr);
+        if (largeFirst)
+            REQUIRE(large->pageAddr == base);
+        else
+            REQUIRE(large->pageAddr == static_cast<char*>(base) + 128 * pageSize);
+        if (small)
+            cache.deallocateSpan(small);
+        cache.deallocateSpan(large);
+
+        Span* merged = cache.findSpan(base);
+        REQUIRE(merged != nullptr);
+        REQUIRE(merged->pageAddr == base && merged->numPages == originPages);
+        REQUIRE(cache.releaseCachedPages() >= originPages * pageSize);
+        REQUIRE(cache.findSpan(base) == nullptr);
+        REQUIRE(cache.reservedBytes() == baseline);
+    }
+    cache.setCachedPageLimit(oldLimit);
+}
+
+void testLargeCacheLimitAndCrossThreadFree()
+{
+    const size_t oldPageLimit = MemoryPool::pageCacheLimit();
+    const size_t oldLargeLimit = MemoryPool::largeCacheLimit();
+    MemoryPool::setLargeCacheLimit(0);
+    MemoryPool::setPageCacheLimit(0);
+    MemoryPool::releaseUnused();
+    const size_t baseline = MemoryPool::stats().reservedBytes;
+
+    MemoryPool::setLargeCacheLimit(8 * 1024 * 1024);
+    void* retained = MemoryPool::allocate(2 * 1024 * 1024);
+    REQUIRE(retained != nullptr);
+    MemoryPool::deallocate(retained, 2 * 1024 * 1024);
+    REQUIRE(MemoryPool::stats().reservedBytes >= baseline + 2 * 1024 * 1024);
+    MemoryPool::setLargeCacheLimit(0);
+    REQUIRE(MemoryPool::stats().reservedBytes == baseline);
+
+    for (size_t size : {size_t(512 * 1024), size_t(1024 * 1024),
+                        size_t(2 * 1024 * 1024)})
+    {
+        void* first = MemoryPool::allocate(size);
+        void* second = MemoryPool::allocate(size);
+        REQUIRE(first != nullptr && second != nullptr);
+        std::thread releaser([second, size] { MemoryPool::deallocate(second, size); });
+        releaser.join();
+        MemoryPool::deallocate(first, size);
+        REQUIRE(MemoryPool::stats().reservedBytes == baseline);
+    }
+
+    MemoryPool::setPageCacheLimit(oldPageLimit);
+    MemoryPool::setLargeCacheLimit(oldLargeLimit);
+}
+
 void testConcurrentCacheReclamation()
 {
     std::cout << "Running concurrent cache reclamation test..." << std::endl;
@@ -1180,6 +1261,7 @@ int main()
         testMultiConsumerCrossThreadFree();
 
         // Lifetime / cache / guards
+        testSplitLargeSpanReclamation();
         testLargeSpanLifetime();
         testPageCacheCapAndReuse();
         testStatsAndSizedFreePath();
@@ -1198,6 +1280,7 @@ int main()
         testAlignedUnsizedFree();
         testExplicitTrim();
         testCacheBudgetsAndReclamation();
+        testLargeCacheLimitAndCrossThreadFree();
         testConcurrentCacheReclamation();
 
         std::cout << "All tests passed successfully!" << std::endl;

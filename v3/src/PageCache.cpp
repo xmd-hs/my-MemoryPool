@@ -188,6 +188,14 @@ PageCache::~PageCache()                  // 析构：删掉所有 Span，把系�
             spans.insert(span);          // 收进集合
     }                                    // 桶循环结束
     freeSpans_.clear();                  // 清空空闲桶
+    const size_t ps = systemPageSize();
+    for (const auto& allocation : systemAllocs_)
+    {
+        const uintptr_t first = reinterpret_cast<uintptr_t>(allocation.first) / ps;
+        for (size_t page = 0; page < allocation.second / ps; ++page)
+            if (Span* span = pageMap_.get(first + page))
+                spans.insert(span);
+    }
     for (Span* span : spans)             // 每个 Span 只删一次
         delete span;                     // 释放元数据对象（不是虚存本身）
     for (auto& alloc : systemAllocs_)    // 遍历每一次向系统的申请
@@ -510,7 +518,11 @@ void PageCache::deallocateSpan(Span* span) // 还一段 Span：合并、缓存�
     span->next = nullptr;                // 断开
     span->debugAllocMap.clear();         // 清调试位图
     span->debugLargeAllocated = false;   // 清大对象调试位
-    if (!wasLarge)                       // 大对象不和旁边小对象空闲段合并
+    const bool completeOrigin = span->pageAddr == span->originAddr &&
+                                span->numPages == span->originPages;
+    if (wasLarge && !completeOrigin)
+        registerPages(span);
+    if (!wasLarge || !completeOrigin)
     {                                    // 合并分支开始
         void* nextAddr = static_cast<char*>(span->pageAddr) + span->numPages * systemPageSize(); // 紧邻后面那一页的地址
         Span* nextSpan = findSpanFromPageMap(nextAddr); // 看后面是不是一段已登记的 span
