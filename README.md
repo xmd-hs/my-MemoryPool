@@ -201,6 +201,25 @@ cmake -S v3 -B v3/build-release -DCMAKE_BUILD_TYPE=Release \
 cmake --build v3/build-release --config Release --parallel
 ```
 
+### 二进制交付
+
+建议用共享库制作独立安装包。以下命令生成 Windows 的 ZIP 或 Linux 的 TGZ，归档只包含公开头文件、库文件及 CMake 包配置，不包含 `v3/src`、测试或示例源码：
+
+```bash
+cmake -S v3 -B build-binary -DCMAKE_BUILD_TYPE=Release -DKAMA_MEMORY_POOL_BUILD_SHARED=ON -DKAMA_MEMORY_POOL_BUILD_TESTS=OFF -DKAMA_MEMORY_POOL_BUILD_EXAMPLES=OFF
+cmake --build build-binary --config Release --parallel
+cpack --config build-binary/CPackConfig.cmake -C Release -B dist
+```
+
+只将 `dist` 中对应系统、架构和编译器的归档交给其他项目。解压后可直接使用已导出的 CMake 目标：
+
+```cmake
+find_package(KamaMemoryPool 1 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE KamaMemoryPool::memory_pool)
+```
+
+配置使用方时将解压目录传给 `CMAKE_PREFIX_PATH`。Windows 共享库的 DLL 须在程序目录或 `PATH` 中；Linux 的 `.so` 须在运行时搜索路径中。若不希望部署共享库，可将构建选项改为 `KAMA_MEMORY_POOL_BUILD_SHARED=OFF` 来生成静态库包。预编译包须与目标系统、架构和编译器 ABI 匹配；跨语言接入可使用公开的 C 接口。分配和释放必须通过同一个库实例完成。公开头文件是编译 C/C++ 调用方所必需的；`Allocator<T>` 等模板包装仍在头文件中，核心内存池实现只存在于二进制中。二进制包不能防止逆向分析。
+
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `KAMA_MEMORY_POOL_BUILD_TESTS` | ON | `unit_test` / `perf_test` |

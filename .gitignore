@@ -4,6 +4,7 @@ build-*/
 **/build/
 cmake-build-*/
 out/
+dist/
 install/
 
 # Local test / benchmark binaries
