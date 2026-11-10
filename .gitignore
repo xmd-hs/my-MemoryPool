@@ -60,3 +60,7 @@ compile_commands.json
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Local project notes
+*优化历程*.md
+*面试笔记*.md
