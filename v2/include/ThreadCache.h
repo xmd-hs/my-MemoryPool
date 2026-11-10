@@ -13,7 +13,7 @@
 #pragma once
 #include "Common.h"
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 class ThreadCache

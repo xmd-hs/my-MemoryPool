@@ -9,7 +9,7 @@
 #include <algorithm>                     // 包含 find_if
 #include <unordered_set>                 // 包含去重用的 set
 
-namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
+namespace xmd_memoryPool                // 进入 xmd_memoryPool 命名空间
 {                                        // 命名空间开始
 
 // ===== PageMap（头文件里有声明） =====
@@ -602,4 +602,4 @@ bool PageCache::removeFromFreeList(Span* span) // 从对应页数的空闲桶里
     return false;                        // 链上没有这段
 }                                        // 函数结束
 
-} // Kama_memoryPool 命名空间结束
+} // xmd_memoryPool 命名空间结束

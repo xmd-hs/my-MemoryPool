@@ -22,7 +22,7 @@
 #include <atomic>                        // 包含原子类型
 #include <vector>                        // 包含 std::vector
 
-namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
+namespace xmd_memoryPool                // 进入 xmd_memoryPool 命名空间
 {                                        // 命名空间开始
 
 constexpr size_t kCentralShardCount = 16; // Linux 高并发下进一步分片，降低同档位锁竞争
@@ -110,4 +110,4 @@ private:                                 // 私有成员开始
     std::array<TransferBin, FREE_LIST_SIZE> transfer_{}; // 每档一个 Transfer 箱子
 };                                       // 类结束
 
-} // Kama_memoryPool 命名空间结束
+} // xmd_memoryPool 命名空间结束

@@ -32,7 +32,7 @@
 #include <utility>                       // 包含 pair
 #include <vector>                        // 包含 vector
 
-namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
+namespace xmd_memoryPool                // 进入 xmd_memoryPool 命名空间
 {                                        // 命名空间开始
 
 // Span：连续几页捆在一起。中央在上面切小块；大对象就把这几页整段给用户
@@ -61,7 +61,7 @@ struct Span                              // 定义 Span
 };                                       // 结构体结束
 
 // 页尾标签：不带大小释放时先读这个，不用查页表
-constexpr uint64_t kPageTagMagic = 0x4B614D61506F6F6CULL; // 校验底数（字母拼成 KaMaPool）
+constexpr uint64_t kPageTagMagic = 0x586D64506F6F6C31ULL; // XmdPool1
 
 struct PageTag                           // 定义页尾标签
 {                                        // 结构体开始
@@ -228,4 +228,4 @@ private:                                 // 私有成员开始
     std::mutex mutex_;                   // 页缓存全局锁（查小对象/中对象页表不走这把锁）
 };                                       // 类结束
 
-} // Kama_memoryPool 命名空间结束
+} // xmd_memoryPool 命名空间结束

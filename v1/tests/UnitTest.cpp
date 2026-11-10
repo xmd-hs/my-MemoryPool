@@ -9,7 +9,7 @@
 
 #include "../include/MemoryPool.h"
 
-using namespace Kama_memoryPool;
+using namespace xmd_memoryPool;
 
 class P1 { public: int id_; };
 class P2 { public: int id_[5]; };

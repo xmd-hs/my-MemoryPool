@@ -3,7 +3,7 @@
 // 门面层，把 allocate/deallocate 委托给 ThreadCache。
 // 同时维护全局统计计数器。
 
-#include <kama/MemoryPool.h>
+#include <xmd/MemoryPool.h>
 #include "CentralCache.h"
 #include "Common.h"
 #include "PageCache.h"
@@ -11,7 +11,7 @@
 
 #include <atomic>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 namespace
@@ -191,4 +191,4 @@ MemoryPoolStats MemoryPool::stats()
     return out;
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

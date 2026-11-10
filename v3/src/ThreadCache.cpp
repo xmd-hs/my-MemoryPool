@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 static std::atomic<size_t> g_largeCacheLimitBytes{8 * 1024 * 1024};
 
@@ -20,7 +20,8 @@ size_t lookupSizeClass(void* ptr)
     const size_t ps = PageCache::pageSize();
     if (const PageTag* tag = pageTagIfValid(ptr, ps))
         return tag->sizeClass;
-    return PageCache::getInstance().findSizeClass(ptr);
+    // The caller resolves the span once when no page tag is present.
+    return FREE_LIST_SIZE;
 }
 
 struct LocalLargeCache
@@ -318,7 +319,7 @@ void* ThreadCache::allocate(size_t size)
     if (size == 0)
         size = ALIGNMENT;
 
-    if (KAMA_UNLIKELY(size >= MAX_BYTES))
+    if (XMD_UNLIKELY(size >= MAX_BYTES))
         return allocateLargeObject(size);
 
     const size_t index = SizeClass::getIndex(size);
@@ -329,7 +330,7 @@ void* ThreadCache::allocate(size_t size)
         freeList_[index] = next;
         --freeListSize_[index];
         if (next)
-            KAMA_PREFETCH(next);
+            XMD_PREFETCH(next);
         if (kDebugGuardsEnabled)
         {
             Span* span = PageCache::getInstance().findSpan(ptr);
@@ -514,4 +515,4 @@ void ThreadCache::returnToCentralCache(size_t index)
     }
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

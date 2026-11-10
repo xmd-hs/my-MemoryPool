@@ -1,6 +1,6 @@
-#include <kama/MemoryPool.h>
-#include <kama/Allocator.h>
-#include <kama/kama_memory_pool.h>
+#include <xmd/MemoryPool.h>
+#include <xmd/Allocator.h>
+#include <xmd/xmd_memory_pool.h>
 #include "Common.h"
 #include "PageCache.h"
 
@@ -16,7 +16,7 @@
 #include <tuple>
 #include <vector>
 
-using namespace Kama_memoryPool;
+using namespace xmd_memoryPool;
 
 #define REQUIRE(cond)                                                                 \
     do                                                                                \
@@ -309,11 +309,11 @@ void testSdkWrappers()
 {
     std::cout << "Running SDK wrapper test..." << std::endl;
 
-    void* p = kama_alloc(48);
+    void* p = xmd_alloc(48);
     REQUIRE(p != nullptr);
     static_cast<char*>(p)[0] = 1;
-    kama_free(p);
-    kama_trim();
+    xmd_free(p);
+    xmd_trim();
 
     std::vector<int, Allocator<int>> nums;
     nums.push_back(1);
@@ -328,13 +328,13 @@ void testStatsAndSizedFreePath()
 {
     std::cout << "Running stats / sized free test..." << std::endl;
 
-#if !KAMA_MEMORY_POOL_STATS_ENABLED
+#if !XMD_MEMORY_POOL_STATS_ENABLED
     {
         std::cout << "Statistics disabled, skipping." << std::endl;
         return;
     }
 #else
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
 #endif
 
@@ -346,7 +346,7 @@ void testStatsAndSizedFreePath()
     MemoryPool::deallocate(p1, 24);
     MemoryPool::deallocate(p2, 512 * 1024);
 
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
     REQUIRE(after.allocCount >= before.allocCount + 2);
     REQUIRE(after.freeCount >= before.freeCount + 2);
@@ -396,7 +396,7 @@ void testNewElementExceptionSafety()
         ThrowOnConstruct() { throw std::runtime_error("boom"); }
     };
 
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
 #endif
     bool thrown = false;
@@ -411,7 +411,7 @@ void testNewElementExceptionSafety()
     REQUIRE(thrown);
     (void)thrown;
 
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     {
         const MemoryPoolStats after = MemoryPool::stats();
         REQUIRE(after.allocCount >= before.allocCount + 1);
@@ -427,7 +427,7 @@ void testNoLeaksAfterMixedTraffic()
 {
     std::cout << "Running no-leak mixed traffic test..." << std::endl;
 
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats before = MemoryPool::stats();
 #endif
 
@@ -465,7 +465,7 @@ void testNoLeaksAfterMixedTraffic()
     REQUIRE(big != nullptr);
     MemoryPool::deallocate(big, 1024 * 1024);
 
-#if KAMA_MEMORY_POOL_STATS_ENABLED
+#if XMD_MEMORY_POOL_STATS_ENABLED
     const MemoryPoolStats after = MemoryPool::stats();
     REQUIRE(after.liveAllocs == before.liveAllocs);
     REQUIRE(after.cachedPageBytes <= 64ull * 1024 * 1024);
@@ -479,7 +479,7 @@ void testDebugGuards()
 {
     std::cout << "Running debug guard test..." << std::endl;
 
-#if !KAMA_MEMORY_POOL_DEBUG_GUARDS
+#if !XMD_MEMORY_POOL_DEBUG_GUARDS
     {
         std::cout << "Debug guards disabled, skipping." << std::endl;
         return;
@@ -720,18 +720,18 @@ void testCApiAlignedAndSizedFree()
 {
     std::cout << "Running C API aligned / sized free test..." << std::endl;
 
-    void* p = kama_alloc_aligned(100, 64);
+    void* p = xmd_alloc_aligned(100, 64);
     REQUIRE(p != nullptr);
     REQUIRE((reinterpret_cast<uintptr_t>(p) & 63) == 0);
     std::memset(p, 0x33, 100);
-    kama_free_sized(p, 100);
+    xmd_free_sized(p, 100);
 
-    void* q = kama_alloc(256);
+    void* q = xmd_alloc(256);
     REQUIRE(q != nullptr);
-    kama_free_sized(q, 256);
+    xmd_free_sized(q, 256);
 
-    REQUIRE(kama_alloc_aligned(32, 0) == nullptr);
-    REQUIRE(kama_alloc_aligned(32, 3) == nullptr);
+    REQUIRE(xmd_alloc_aligned(32, 0) == nullptr);
+    REQUIRE(xmd_alloc_aligned(32, 3) == nullptr);
 
     std::cout << "C API aligned / sized free test passed!" << std::endl;
 }
@@ -740,7 +740,7 @@ void testWrongSizeFreeRejectedWithGuards()
 {
     std::cout << "Running wrong-size free guard test..." << std::endl;
 
-#if !KAMA_MEMORY_POOL_DEBUG_GUARDS
+#if !XMD_MEMORY_POOL_DEBUG_GUARDS
     std::cout << "Debug guards disabled, skipping." << std::endl;
 #else
     void* p = MemoryPool::allocate(64);
@@ -1071,10 +1071,10 @@ void testCacheBudgetsAndReclamation()
     const size_t oldPageLimit = MemoryPool::pageCacheLimit();
     const size_t oldLargeLimit = MemoryPool::largeCacheLimit();
 
-    kama_set_page_cache_limit(128 * MiB);
-    kama_set_large_cache_limit(0);
-    REQUIRE(kama_page_cache_limit() == 128 * MiB);
-    REQUIRE(kama_large_cache_limit() == 0);
+    xmd_set_page_cache_limit(128 * MiB);
+    xmd_set_large_cache_limit(0);
+    REQUIRE(xmd_page_cache_limit() == 128 * MiB);
+    REQUIRE(xmd_large_cache_limit() == 0);
     MemoryPool::releaseUnused();
 
     void* active = MemoryPool::allocate(24 * MiB);
@@ -1096,7 +1096,7 @@ void testCacheBudgetsAndReclamation()
     REQUIRE(idleAgain != nullptr);
     MemoryPool::deallocate(idleAgain, 24 * MiB);
     const auto beforeRelease = MemoryPool::stats();
-    kama_release_unused();
+    xmd_release_unused();
     const auto afterRelease = MemoryPool::stats();
     REQUIRE(afterRelease.cachedPageBytes + 24 * MiB <= beforeRelease.cachedPageBytes);
     REQUIRE(checkPattern(active, 64, 0xCAFEu));

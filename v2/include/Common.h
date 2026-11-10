@@ -26,7 +26,7 @@
 #include <intrin.h>  // _mm_pause 等内联函数
 #endif
 
-namespace Kama_memoryPool  // 命名空间，避免符号冲突
+namespace xmd_memoryPool  // 命名空间，避免符号冲突
 {
 
 // ---- 全局常量 ----
@@ -244,4 +244,4 @@ public:
     }
 };
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

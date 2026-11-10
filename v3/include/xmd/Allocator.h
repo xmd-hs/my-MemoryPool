@@ -7,7 +7,7 @@
 #include <new>
 #include <type_traits>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 template<typename T>

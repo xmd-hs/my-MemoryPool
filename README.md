@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD013 MD033 MD060 -->
 
-# my-MemoryPool
+# xmdMemoryPool
 
 C++14 内存池。日常用 **v3**：线程本地缓存 → 按 size class 分片的中央缓存（含 lock-free Transfer）→ 页缓存，用来摊掉系统分配器调用和多线程锁竞争。
 
@@ -8,12 +8,12 @@ C++14 内存池。日常用 **v3**：线程本地缓存 → 按 size class 分�
 
 ## 对外 API
 
-头文件在 `v3/include/kama/`。
+头文件在 `v3/include/xmd/`。`2.0.0` 统一使用 xmd 品牌：C++ 命名空间为 `xmd_memoryPool`，C 接口为 `xmd_*`，构建选项前缀为 `XMD_`；与 1.x 二进制及头文件不兼容，调用方须重新编译。
 
 ### C++：`MemoryPool.h`
 
 ```cpp
-namespace Kama_memoryPool {
+namespace xmd_memoryPool {
 
 constexpr std::size_t kAlignment = 8;
 constexpr std::size_t kMaxBytes  = 512 * 1024;   // 512KiB
@@ -55,11 +55,11 @@ void deleteElement(T* p);
 | `deallocate(ptr, size)` | 小对象按 size 归档；大对象仍需查找 Span 元数据 |
 | `trim()` | 轻量整理当前线程超水位的小对象；保留大对象热缓存 |
 | `releaseUnused()` | 交出当前线程缓存、排空 Transfer，并回收可释放的完整空闲页段 |
-| `stats()` | `reservedBytes` / `cachedPageBytes` 始终有效；其余计数需打开 `KAMA_MEMORY_POOL_ENABLE_STATS` |
+| `stats()` | `reservedBytes` / `cachedPageBytes` 始终有效；其余计数需打开 `XMD_MEMORY_POOL_ENABLE_STATS` |
 
 ### C++：`Allocator.h`
 
-STL 兼容分配器，可用于 `std::vector<T, Kama_memoryPool::Allocator<T>>`。
+STL 兼容分配器，可用于 `std::vector<T, xmd_memoryPool::Allocator<T>>`。
 
 ```cpp
 template<typename T>
@@ -73,19 +73,19 @@ public:
 
 `alignof(T) <= 8` 时走 sized 路径；更大对齐走 `allocateAligned` + unsized free。无状态：`is_always_equal`，任意两个 `Allocator` 相等。
 
-### C：`kama_memory_pool.h`
+### C：`xmd_memory_pool.h`
 
 ```c
-void* kama_alloc(size_t size);
-void* kama_alloc_aligned(size_t size, size_t alignment);
-void  kama_free(void* ptr);
-void  kama_free_sized(void* ptr, size_t size);
-void  kama_trim(void);
-void  kama_set_page_cache_limit(size_t bytes);
-size_t kama_page_cache_limit(void);
-void  kama_set_large_cache_limit(size_t bytes);
-size_t kama_large_cache_limit(void);
-void  kama_release_unused(void);
+void* xmd_alloc(size_t size);
+void* xmd_alloc_aligned(size_t size, size_t alignment);
+void  xmd_free(void* ptr);
+void  xmd_free_sized(void* ptr, size_t size);
+void  xmd_trim(void);
+void  xmd_set_page_cache_limit(size_t bytes);
+size_t xmd_page_cache_limit(void);
+void  xmd_set_large_cache_limit(size_t bytes);
+size_t xmd_large_cache_limit(void);
+void  xmd_release_unused(void);
 ```
 
 分别对应 `allocate` / `allocateAligned` / `deallocate` / `deallocate(ptr, size)` / `trim`。
@@ -93,13 +93,13 @@ void  kama_release_unused(void);
 ### 示例
 
 ```cpp
-#include <kama/MemoryPool.h>
-#include <kama/Allocator.h>
-#include <kama/kama_memory_pool.h>
+#include <xmd/MemoryPool.h>
+#include <xmd/Allocator.h>
+#include <xmd/xmd_memory_pool.h>
 #include <vector>
 
 void demo() {
-    using namespace Kama_memoryPool;
+    using namespace xmd_memoryPool;
 
     void* p = MemoryPool::allocate(64);
     MemoryPool::deallocate(p, 64);
@@ -110,8 +110,8 @@ void demo() {
     std::vector<int, Allocator<int>> values;
     values.push_back(42);
 
-    void* q = kama_alloc(32);
-    kama_free(q);
+    void* q = xmd_alloc(32);
+    xmd_free(q);
 
     MemoryPool::trim();   // 空闲点收回本线程多余缓存
 }
@@ -120,11 +120,11 @@ void demo() {
 ## 仓库结构
 
 ```text
-my-MemoryPool/
+xmdMemoryPool/
 |-- v1/     教学版：固定槽 + 带 tag 的无锁自由链表
 |-- v2/     三层缓存早期实现
 |-- v3/     推荐版本
-|   |-- include/kama/     对外头文件
+|   |-- include/xmd/     对外头文件
 |   |-- src/              ThreadCache / CentralCache / PageCache
 |   |-- tests/            unit_test、perf_test
 |   |-- examples/
@@ -189,7 +189,7 @@ unsized free（只给指针）是相对 glibc 的关键路径：`blockSize <= 25
 
 MemoryPool::setPageCacheLimit 设置进程级空闲页预算，默认 32MiB；MemoryPool::setLargeCacheLimit 设置每线程大对象缓存预算，默认 8MiB。两个预算都接受 0，表示不保留对应缓存。降低页预算会立即释放完整空闲的系统申请段；部分空闲段仍有占用，不能归还，因此页预算是可回收部分的软上限。降低大对象预算立即约束调用线程，其他线程在下次使用该缓存时收缩。
 
-MemoryPool::releaseUnused 交出调用线程的全部空闲块和大对象缓存、排空当时可见的 Transfer 块，再归还 PageCache 中完整空闲的系统申请段。其他线程的 TLS 缓存与活动分配不会被强制回收；并发调用按尽力而为处理。原有 trim 仍只收缩调用线程的超水位缓存。C API 提供 kama_set_page_cache_limit、kama_set_large_cache_limit、kama_release_unused 及两个预算查询函数。
+MemoryPool::releaseUnused 交出调用线程的全部空闲块和大对象缓存、排空当时可见的 Transfer 块，再归还 PageCache 中完整空闲的系统申请段。其他线程的 TLS 缓存与活动分配不会被强制回收；并发调用按尽力而为处理。原有 trim 仍只收缩调用线程的超水位缓存。C API 提供 xmd_set_page_cache_limit、xmd_set_large_cache_limit、xmd_release_unused 及两个预算查询函数。
 
 ## 构建
 
@@ -197,7 +197,7 @@ CMake 3.14+、C++14。未开 sanitizer 时 Release 会尝试打开 LTO/LTCG。
 
 ```bash
 cmake -S v3 -B v3/build-release -DCMAKE_BUILD_TYPE=Release \
-  -DKAMA_MEMORY_POOL_BUILD_TESTS=ON -DKAMA_MEMORY_POOL_BUILD_EXAMPLES=ON
+  -DXMD_MEMORY_POOL_BUILD_TESTS=ON -DXMD_MEMORY_POOL_BUILD_EXAMPLES=ON
 cmake --build v3/build-release --config Release --parallel
 ```
 
@@ -206,7 +206,7 @@ cmake --build v3/build-release --config Release --parallel
 建议用共享库制作独立安装包。以下命令生成 Windows 的 ZIP 或 Linux 的 TGZ，归档只包含公开头文件、库文件及 CMake 包配置，不包含 `v3/src`、测试或示例源码：
 
 ```bash
-cmake -S v3 -B build-binary -DCMAKE_BUILD_TYPE=Release -DKAMA_MEMORY_POOL_BUILD_SHARED=ON -DKAMA_MEMORY_POOL_BUILD_TESTS=OFF -DKAMA_MEMORY_POOL_BUILD_EXAMPLES=OFF
+cmake -S v3 -B build-binary -DCMAKE_BUILD_TYPE=Release -DXMD_MEMORY_POOL_BUILD_SHARED=ON -DXMD_MEMORY_POOL_BUILD_TESTS=OFF -DXMD_MEMORY_POOL_BUILD_EXAMPLES=OFF
 cmake --build build-binary --config Release --parallel
 cpack --config build-binary/CPackConfig.cmake -C Release -B dist
 ```
@@ -214,27 +214,27 @@ cpack --config build-binary/CPackConfig.cmake -C Release -B dist
 只将 `dist` 中对应系统、架构和编译器的归档交给其他项目。解压后可直接使用已导出的 CMake 目标：
 
 ```cmake
-find_package(KamaMemoryPool 1 CONFIG REQUIRED)
-target_link_libraries(your_target PRIVATE KamaMemoryPool::memory_pool)
+find_package(xmdMemoryPool 2 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE xmdMemoryPool::memory_pool)
 ```
 
-配置使用方时将解压目录传给 `CMAKE_PREFIX_PATH`。Windows 共享库的 DLL 须在程序目录或 `PATH` 中；Linux 的 `.so` 须在运行时搜索路径中。若不希望部署共享库，可将构建选项改为 `KAMA_MEMORY_POOL_BUILD_SHARED=OFF` 来生成静态库包。预编译包须与目标系统、架构和编译器 ABI 匹配；跨语言接入可使用公开的 C 接口。分配和释放必须通过同一个库实例完成。公开头文件是编译 C/C++ 调用方所必需的；`Allocator<T>` 等模板包装仍在头文件中，核心内存池实现只存在于二进制中。二进制包不能防止逆向分析。
+配置使用方时将解压目录传给 `CMAKE_PREFIX_PATH`。Windows 共享库的 DLL 须在程序目录或 `PATH` 中；Linux 的 `.so` 须在运行时搜索路径中。若不希望部署共享库，可将构建选项改为 `XMD_MEMORY_POOL_BUILD_SHARED=OFF` 来生成静态库包。预编译包须与目标系统、架构和编译器 ABI 匹配；跨语言接入可使用公开的 C 接口。分配和释放必须通过同一个库实例完成。公开头文件是编译 C/C++ 调用方所必需的；`Allocator<T>` 等模板包装仍在头文件中，核心内存池实现只存在于二进制中。二进制包不能防止逆向分析。
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
-| `KAMA_MEMORY_POOL_BUILD_TESTS` | ON | `unit_test` / `perf_test` |
-| `KAMA_MEMORY_POOL_BUILD_EXAMPLES` | ON | `kama_example` |
-| `KAMA_MEMORY_POOL_BUILD_SHARED` | OFF | 共享库 |
-| `KAMA_MEMORY_POOL_ENABLE_STATS` | OFF | 热路径原子计数，测速请关 |
-| `KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS` | OFF | double free / 错误 size |
-| `KAMA_MEMORY_POOL_ENABLE_ASAN` / `UBSAN` / `TSAN` | OFF | TSan 不能和 ASan/UBSan 一起 |
+| `XMD_MEMORY_POOL_BUILD_TESTS` | ON | `unit_test` / `perf_test` |
+| `XMD_MEMORY_POOL_BUILD_EXAMPLES` | ON | `xmd_example` |
+| `XMD_MEMORY_POOL_BUILD_SHARED` | OFF | 共享库 |
+| `XMD_MEMORY_POOL_ENABLE_STATS` | OFF | 热路径原子计数，测速请关 |
+| `XMD_MEMORY_POOL_ENABLE_DEBUG_GUARDS` | OFF | double free / 错误 size |
+| `XMD_MEMORY_POOL_ENABLE_ASAN` / `UBSAN` / `TSAN` | OFF | TSan 不能和 ASan/UBSan 一起 |
 
 ```bash
 cmake --build v3/build-release --config Release --target run_unit_tests
 cmake --build v3/build-release --config Release --target perf
 ```
 
-Linux：`bash v3/run_linux_quick.sh [build_dir]`，或 `docker build -f v3/Dockerfile.linux_perf -t kama-mp v3`。WSL 下可将 `build_dir` 指向 Linux 文件系统以避免跨文件系统构建开销。
+Linux：`bash v3/run_linux_quick.sh [build_dir]`，或 `docker build -f v3/Dockerfile.linux_perf -t xmd-mp v3`。WSL 下可将 `build_dir` 指向 Linux 文件系统以避免跨文件系统构建开销。
 
 ## 测试
 

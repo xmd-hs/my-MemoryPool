@@ -1,4 +1,4 @@
-#include <kama/MemoryPool.h>
+#include <xmd/MemoryPool.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -76,12 +76,12 @@ int main(int argc, char** argv)
     std::vector<std::vector<uint64_t>> samples(threads);
     std::atomic<size_t> liveBytes{0}, peakLiveBytes{0}, failures{0}, remoteFrees{0}, queueFull{0};
     auto release = [&](Block block) {
-        if (pool) Kama_memoryPool::MemoryPool::deallocate(block.ptr, block.size);
+        if (pool) xmd_memoryPool::MemoryPool::deallocate(block.ptr, block.size);
         else std::free(block.ptr);
         liveBytes.fetch_sub(block.size, std::memory_order_relaxed);
     };
     auto allocate = [&](size_t size) -> void* {
-        void* ptr = pool ? Kama_memoryPool::MemoryPool::allocate(size) : std::malloc(size);
+        void* ptr = pool ? xmd_memoryPool::MemoryPool::allocate(size) : std::malloc(size);
         if (!ptr) { failures.fetch_add(1, std::memory_order_relaxed); return nullptr; }
         const size_t now = liveBytes.fetch_add(size, std::memory_order_relaxed) + size;
         size_t peak = peakLiveBytes.load(std::memory_order_relaxed);
@@ -158,10 +158,10 @@ int main(int argc, char** argv)
     const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
     const size_t peakRSSKiB = linuxStatusKiB("VmHWM:");
     const size_t rssAfterFreeKiB = linuxStatusKiB("VmRSS:");
-    const size_t reservedBeforeRelease = pool ? Kama_memoryPool::MemoryPool::stats().reservedBytes : 0;
-    if (pool) Kama_memoryPool::MemoryPool::releaseUnused();
+    const size_t reservedBeforeRelease = pool ? xmd_memoryPool::MemoryPool::stats().reservedBytes : 0;
+    if (pool) xmd_memoryPool::MemoryPool::releaseUnused();
     const size_t rssAfterReleaseKiB = linuxStatusKiB("VmRSS:");
-    const size_t reservedAfterRelease = pool ? Kama_memoryPool::MemoryPool::stats().reservedBytes : 0;
+    const size_t reservedAfterRelease = pool ? xmd_memoryPool::MemoryPool::stats().reservedBytes : 0;
 
     std::vector<uint64_t> allSamples;
     for (auto& workerSamples : samples)

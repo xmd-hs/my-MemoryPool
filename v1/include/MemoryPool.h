@@ -18,7 +18,7 @@
 #include <mutex>
 #include <new>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 // 64 个池，槽大小从 8B 到 512B，每 8B 一档：8, 16, 24, ..., 512
 #define MEMORY_POOL_NUM 64
@@ -168,4 +168,4 @@ void deleteElement(T* p)
     }
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

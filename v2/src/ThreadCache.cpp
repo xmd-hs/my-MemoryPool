@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 // ===== 构造/析构 =====

@@ -23,7 +23,7 @@
 #endif
 #endif
 
-namespace Kama_memoryPool  // 命名空间，避免和其他库的同名函数冲突
+namespace xmd_memoryPool  // 命名空间，避免和其他库的同名函数冲突
 {
 
 // 申请 size 字节的页对齐内存（匿名映射，已清零）
@@ -70,4 +70,4 @@ inline void freePages(void* ptr, size_t size)
 #endif
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

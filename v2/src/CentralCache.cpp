@@ -17,7 +17,7 @@
 #include <memory>
 #include <unordered_map>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 const std::chrono::milliseconds CentralCache::DELAY_INTERVAL{1000};  // 1 秒

@@ -18,7 +18,7 @@
 #include <utility>
 #include <vector>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 class PageCache
@@ -67,4 +67,4 @@ private:
     std::mutex mutex_;
 };
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

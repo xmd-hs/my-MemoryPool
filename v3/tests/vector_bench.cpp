@@ -1,9 +1,9 @@
-#include <kama/Allocator.h>
-#include <kama/MemoryPool.h>
+#include <xmd/Allocator.h>
+#include <xmd/MemoryPool.h>
 #include <chrono>
 #include <iostream>
 #include <vector>
-using namespace Kama_memoryPool;
+using namespace xmd_memoryPool;
 using Clock = std::chrono::steady_clock;
 int main() {
   for (int warm=0; warm<3; ++warm) {

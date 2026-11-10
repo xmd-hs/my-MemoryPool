@@ -8,7 +8,7 @@
 #include <utility>
 #include <array>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 constexpr std::size_t kAlignment = 8;
@@ -39,20 +39,20 @@ struct MemoryPoolStats
 class MemoryPool
 {
 public:
-    static KAMA_API void* allocate(std::size_t size);
-    static KAMA_API void* allocateAligned(std::size_t size, std::size_t alignment);
-    static KAMA_API void  deallocate(void* ptr);
-    static KAMA_API void  deallocate(void* ptr, std::size_t size);
+    static XMD_API void* allocate(std::size_t size);
+    static XMD_API void* allocateAligned(std::size_t size, std::size_t alignment);
+    static XMD_API void  deallocate(void* ptr);
+    static XMD_API void  deallocate(void* ptr, std::size_t size);
 
-    static KAMA_API void  trim();
+    static XMD_API void  trim();
 
-    static KAMA_API void setPageCacheLimit(std::size_t bytes);
-    static KAMA_API std::size_t pageCacheLimit();
-    static KAMA_API void setLargeCacheLimit(std::size_t bytes);
-    static KAMA_API std::size_t largeCacheLimit();
+    static XMD_API void setPageCacheLimit(std::size_t bytes);
+    static XMD_API std::size_t pageCacheLimit();
+    static XMD_API void setLargeCacheLimit(std::size_t bytes);
+    static XMD_API std::size_t largeCacheLimit();
 
-    static KAMA_API void releaseUnused();
-    static KAMA_API MemoryPoolStats stats();
+    static XMD_API void releaseUnused();
+    static XMD_API MemoryPoolStats stats();
 
     template<typename T, typename... Args>
     static T* newElement(Args&&... args)

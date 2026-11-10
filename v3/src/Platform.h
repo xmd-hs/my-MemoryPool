@@ -18,7 +18,7 @@
 #endif
 #endif
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 inline size_t systemPageSize()
@@ -93,4 +93,4 @@ inline void freePages(void* ptr, size_t size)
 #endif
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

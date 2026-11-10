@@ -13,7 +13,7 @@
 #include <thread>                        // 包含线程 id
 #include <vector>                        // 包含 std::vector
 
-namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
+namespace xmd_memoryPool                // 进入 xmd_memoryPool 命名空间
 {                                        // 命名空间开始
 
 CentralCache::CentralCache()             // 构造函数：清空全部分片和箱子
@@ -504,4 +504,4 @@ void CentralCache::returnRange(void* start, size_t blockCount, size_t index) // 
     returnGroups(index, localShardId(), groups); // 还回各 span 所在分片
 }                                        // 函数结束
 
-} // Kama_memoryPool 命名空间结束
+} // xmd_memoryPool 命名空间结束

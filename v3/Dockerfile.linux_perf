@@ -15,9 +15,9 @@ COPY . /workspace/v3/
 RUN mkdir -p build && cd build && \
     cmake .. \
       -DCMAKE_BUILD_TYPE=Release \
-      -DKAMA_MEMORY_POOL_BUILD_TESTS=ON \
-      -DKAMA_MEMORY_POOL_ENABLE_STATS=OFF \
-      -DKAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF && \
+      -DXMD_MEMORY_POOL_BUILD_TESTS=ON \
+      -DXMD_MEMORY_POOL_ENABLE_STATS=OFF \
+      -DXMD_MEMORY_POOL_ENABLE_DEBUG_GUARDS=OFF && \
     make -j$(nproc)
 
 CMD ["./build/perf_test"]

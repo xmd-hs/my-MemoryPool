@@ -1,6 +1,6 @@
 #include <benchmark/benchmark.h>
 
-#include <kama/MemoryPool.h>
+#include <xmd/MemoryPool.h>
 
 #include <array>
 #include <cstdlib>
@@ -8,7 +8,7 @@
 #include <thread>
 #include <vector>
 
-using Kama_memoryPool::MemoryPool;
+using xmd_memoryPool::MemoryPool;
 
 // ---------------------------------------------------------------------------
 // 辅助：系统分配器后端

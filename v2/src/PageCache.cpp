@@ -13,7 +13,7 @@
 #include "Platform.h"
 #include <iterator>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 // ===== 析构 =====
@@ -188,4 +188,4 @@ void* PageCache::systemAlloc(size_t numPages)
     return ptr;
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

@@ -1,14 +1,14 @@
-#include <kama/Allocator.h>
-#include <kama/MemoryPool.h>
-#include <kama/kama_memory_pool.h>
+#include <xmd/Allocator.h>
+#include <xmd/MemoryPool.h>
+#include <xmd/xmd_memory_pool.h>
 
 #include <iostream>
 #include <vector>
 
 int main()
 {
-    using Kama_memoryPool::MemoryPool;
-    using Kama_memoryPool::Allocator;
+    using xmd_memoryPool::MemoryPool;
+    using xmd_memoryPool::Allocator;
 
     void* p = MemoryPool::allocate(64);
     if (!p)
@@ -26,11 +26,11 @@ int main()
     nums.push_back(1);
     nums.push_back(2);
 
-    void* q = kama_alloc(32);
-    kama_free(q);
+    void* q = xmd_alloc(32);
+    xmd_free(q);
 
     auto st = MemoryPool::stats();
-    std::cout << "kama memory pool sdk ok, alloc=" << st.allocCount
+    std::cout << "xmd memory pool sdk ok, alloc=" << st.allocCount
               << " free=" << st.freeCount << "\n";
     return 0;
 }

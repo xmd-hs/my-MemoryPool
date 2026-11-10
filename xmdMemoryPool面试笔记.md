@@ -1,8 +1,8 @@
 <!-- markdownlint-disable MD013 MD024 MD026 MD033 MD036 MD040 MD060 -->
 
-# my-MemoryPool 面试笔记
+# xmdMemoryPool 面试笔记
 
-基于 my-MemoryPool（v1 → v2 → v3，含 `2855c59` 之后的 trim / 页标签 / Transfer）整理。
+基于 xmdMemoryPool（v1 → v2 → v3，含 `2855c59` 之后的 trim / 页标签 / Transfer）整理。
 读完后应能独立讲清：为什么做池、三层怎么分、锁怎么减、跨线程块怎么回到可复用状态、unsized free 怎么做到接近 glibc，以及和 tcmalloc 的差距。
 
 ## 目录
@@ -37,7 +37,7 @@
 | 多线程抢同一把全局锁 | CentralCache 按 size class × 8 shard，miss 后 steal，再 pop Transfer |
 | 页级碎片、反复向 OS 要内存 | PageCache 缓存 span、同 origin 相邻合并，空闲上限 64 MiB |
 
-**对外接口：** `MemoryPool::allocate/deallocate`、`allocateAligned`、`trim`、`newElement/deleteElement`、`Allocator<T>`、C ABI `kama_alloc` / `kama_free` / `kama_trim`。
+**对外接口：** `MemoryPool::allocate/deallocate`、`allocateAligned`、`trim`、`newElement/deleteElement`、`Allocator<T>`、C ABI `xmd_alloc` / `xmd_free` / `xmd_trim`。
 
 **性能口播**（提交 `2855c59`，关 Stats/Guards、Release + LTO/LTCG）：Windows 核心套件 48 WIN / 0 LOSE；Linux 46 WIN / 2 TIE / 0 LOSE。不要说「全面碾压 glibc」，说「核心套件不慢于系统 5%，Windows 领先幅度更大」。
 
@@ -110,7 +110,7 @@
 | Central 锁 | 每 class 1 把 | class × 8 shard，允许 steal |
 | 跨线程 | 进当前线程 TLS，无线上杂志 | TLS + 有界 TransferBin；remote 栈仍保留 |
 | 线程退出 | 有 flush | `flushAll` → `pushTransfer`，析构再冲大 span |
-| 对齐 / STL / C API | 弱 | `Allocator<T>` + `kama_*` + `trim()` |
+| 对齐 / STL / C API | 弱 | `Allocator<T>` + `xmd_*` + `trim()` |
 | 可观测 | 无 | 可选 Stats（含 per-class hit/miss）/ Debug Guards / ASan TSan |
 | 页缓存上限 | 无明确驱逐 | 空闲页上限 64 MiB，超出还 OS |
 | 构建 | 无 | Release IPO（LTO / LTCG），sanitizer 时关闭 |
@@ -309,7 +309,7 @@ macOS 批次更保守（小对象 256/128…），因为本机线程少、过度
 
 `~ThreadCache()`：`flushAll()` 把残留小对象 `pushTransfer`，再把本线程大 span 缓存还 PageCache。否则线程死了，这些页永远困在 TLS 里 → 泄漏。对应测试 `testThreadExitReturnsMemory`。
 
-`MemoryPool::trim()` / `kama_trim()`：空闲点主动把超水位小对象推走，并清空本线程大 span 缓存。cooperative，不扫描别的线程 TLS。对应 `testExplicitTrim`。
+`MemoryPool::trim()` / `xmd_trim()`：空闲点主动把超水位小对象推走，并清空本线程大 span 缓存。cooperative，不扫描别的线程 TLS。对应 `testExplicitTrim`。
 
 **Q：** `thread_local` 析构顺序会不会已经用不到 CentralCache？
 
@@ -449,7 +449,7 @@ span 有一个 **不可变 home shard**：第一次挂上哪个 shard，之后�
 
 ```cpp
 struct PageTag { uint64_t magic; uint32_t sizeClass; uint32_t _pad; };
-magic = 0x4B614D61506F6F6C ^ pageBase ^ (pageBase >> 17);  // "KaMaPool"
+magic = 0x586D64506F6F6C31 ^ pageBase ^ (pageBase >> 17);  // "XmdPool1"
 ```
 
 - 只给 `blockSize ≤ 256` 的页打标签
@@ -629,7 +629,7 @@ deallocate 对 `alignof(T)≤8` 走 sized free，否则 unsized（过对齐升�
 
 ### 11.5 trim
 
-`MemoryPool::trim()` 只处理当前线程：超水位小对象推 Transfer，大 span 缓存清空。C ABI 是 `kama_trim()`。
+`MemoryPool::trim()` 只处理当前线程：超水位小对象推 Transfer，大 span 缓存清空。C ABI 是 `xmd_trim()`。
 
 不要说「全局回收所有线程」——做不到，也不该在热路径扫别人的 TLS。
 
@@ -835,7 +835,7 @@ catch 后 deallocate 再 throw。对应测试 `testNewElementExceptionSafety`：
 - 野指针：`findSpan` 失败则忽略
 - 大对象：必须整 span 起点
 
-生产环境关掉（CMake `KAMA_MEMORY_POOL_ENABLE_DEBUG_GUARDS`），热路径零开销（`if constexpr`）。
+生产环境关掉（CMake `XMD_MEMORY_POOL_ENABLE_DEBUG_GUARDS`），热路径零开销（`if constexpr`）。
 
 #### D7. 为什么 unsized 不缓存「页 → size class」？
 
@@ -960,7 +960,7 @@ page_id = ptr >> pageShift;
 
 ```
 v3/
-|-- include/kama/      对外：MemoryPool / Allocator / C API / export
+|-- include/xmd/      对外：MemoryPool / Allocator / C API / export
 |-- src/
 |   |-- Common.h       SizeClass 表、SpinLock、Stats 开关、prefetch
 |   |-- ThreadCache.*  TLS 空闲链表、batch、大对象 8MiB 缓存、trim
@@ -995,6 +995,6 @@ v3/
 - [ ] 和 tcmalloc 的真实差距
 - [ ] 否掉过哪些方案（超大 Transfer、16 片、bump-pointer）
 
-文档对应代码：my-MemoryPool v1 / v2 / v3。面试以当前 v3 源码为准；用 v1 讲 CAS/ABA；用 v2→v3 和 [优化历程.md](优化历程.md) 讲「怎么从打不过 glibc 打到核心套件不 LOSE」。
+文档对应代码：xmdMemoryPool v1 / v2 / v3。面试以当前 v3 源码为准；用 v1 讲 CAS/ABA；用 v2→v3 和 [优化历程.md](优化历程.md) 讲「怎么从打不过 glibc 打到核心套件不 LOSE」。
 
 性能数字以提交 `2855c59` 的 README / 优化历程第 8 节为准，后续改动（trim、页标签改小、大对象字节上限、remote hint exchange）没有改 API 语义。

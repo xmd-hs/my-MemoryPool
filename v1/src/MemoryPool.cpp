@@ -1,6 +1,6 @@
 #include "../include/MemoryPool.h"
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 // ============================================================================
 // 构造：只设默认 block 大小，其他字段等 init() 才设
@@ -213,4 +213,4 @@ MemoryPool& HashBucket::getMemoryPool(int index)
     return memoryPool[index];
 }
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

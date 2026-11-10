@@ -9,7 +9,7 @@
 //   3. 大对象不再 malloc/free，走本线程 LocalLargeCache（8MiB）+ PageCache 整段 Span
 //   4. 本线程溢出 / 线程退出改 pushTransfer，切好的块留给别的线程，不再 returnRange 拆回 Span
 //   5. 向中央批发时带 batchNum，中央回传 fetchedCount，不必自己扫链数块
-//   6. 命中本地链后预取下一块（KAMA_PREFETCH）；大对象路径用 KAMA_UNLIKELY
+//   6. 命中本地链后预取下一块（XMD_PREFETCH）；大对象路径用 XMD_UNLIKELY
 //   7. 本地水位按档放大（32B 可囤 4096，不再是「32KB/块大小、上限 256」）
 //   8. 新增 allocateAligned：抬到块大小能被 alignment 整除的档，再复用 allocate
 //   9. trim() 仅处理超水位小对象；releaseUnused() 执行强制回收
@@ -19,7 +19,7 @@
 #include <array>                         // 包含 std::array
 #include <cstdint>
 
-namespace Kama_memoryPool                // 进入 Kama_memoryPool 命名空间
+namespace xmd_memoryPool                // 进入 xmd_memoryPool 命名空间
 {                                        // 命名空间开始
 
 class ThreadCache                        // 定义线程缓存类
@@ -84,4 +84,4 @@ private:                                 // 私有成员开始
     std::array<std::uint16_t, FREE_LIST_SIZE> cacheLimit_{};
 };                                       // 类结束
 
-} // Kama_memoryPool 命名空间结束
+} // xmd_memoryPool 命名空间结束

@@ -4,14 +4,14 @@
 //   1. kMaxBytes 从 256KB 提到 512KB
 //   2. 新增 kIndexMap：0~512KB 所有大小都能 O(1) 查档位（v2 只有 0~256）
 //   3. 自旋锁 yield 阈值固定为 1024，减少内核切换
-//   4. 新增 KAMA_LIKELY/KAMA_UNLIKELY 分支预测宏
-//   5. 新增 KAMA_PREFETCH 预取宏
+//   4. 新增 XMD_LIKELY/XMD_UNLIKELY 分支预测宏
+//   5. 新增 XMD_PREFETCH 预取宏
 //   6. 新增 kBlockHeaderSize（预留，目前未使用 per-block header）
 //   7. 统计功能可通过宏开关
 
 #pragma once  // 防止重复包含
 
-#include <kama/MemoryPool.h>  // 引入 kAlignment / kMaxBytes
+#include <xmd/MemoryPool.h>  // 引入 kAlignment / kMaxBytes
 
 #include <algorithm>   // std::max
 #include <atomic>      // std::atomic_flag
@@ -23,21 +23,21 @@
 #include <intrin.h>  // _mm_pause / _mm_prefetch
 #endif
 
-namespace Kama_memoryPool  // 命名空间
+namespace xmd_memoryPool  // 命名空间
 {
 
 // 调试护栏宏：开启后会检查重复分配/重复释放
-#ifndef KAMA_MEMORY_POOL_DEBUG_GUARDS
-#define KAMA_MEMORY_POOL_DEBUG_GUARDS 0
+#ifndef XMD_MEMORY_POOL_DEBUG_GUARDS
+#define XMD_MEMORY_POOL_DEBUG_GUARDS 0
 #endif
 
 // 统计宏：开启后记录各种计数
-#ifndef KAMA_MEMORY_POOL_STATS_ENABLED
-#define KAMA_MEMORY_POOL_STATS_ENABLED 0
+#ifndef XMD_MEMORY_POOL_STATS_ENABLED
+#define XMD_MEMORY_POOL_STATS_ENABLED 0
 #endif
 
-constexpr bool kDebugGuardsEnabled = KAMA_MEMORY_POOL_DEBUG_GUARDS != 0;  // 调试护栏是否开启
-constexpr bool kStatsEnabled = KAMA_MEMORY_POOL_STATS_ENABLED != 0;        // 统计是否开启
+constexpr bool kDebugGuardsEnabled = XMD_MEMORY_POOL_DEBUG_GUARDS != 0;  // 调试护栏是否开启
+constexpr bool kStatsEnabled = XMD_MEMORY_POOL_STATS_ENABLED != 0;        // 统计是否开启
 
 constexpr size_t ALIGNMENT = kAlignment;     // 对齐基准 8（从 MemoryPool.h 引入）
 constexpr size_t MAX_BYTES = kMaxBytes;      // 切块上限 512KB（≥ 这个走大对象；中间那段叫中对象）
@@ -45,16 +45,16 @@ constexpr size_t kMaxSizeClasses = 96;       // size class 表容量
 
 // 分支预测宏：告诉编译器哪个分支更可能，优化指令缓存
 #if defined(__GNUC__) || defined(__clang__)
-#define KAMA_LIKELY(x) __builtin_expect(!!(x), 1)    // x 很可能为真
-#define KAMA_UNLIKELY(x) __builtin_expect(!!(x), 0)  // x 很可能为假
-#define KAMA_PREFETCH(p) __builtin_prefetch(static_cast<const void*>(p), 1, 3)  // 读预取，高局部性
+#define XMD_LIKELY(x) __builtin_expect(!!(x), 1)    // x 很可能为真
+#define XMD_UNLIKELY(x) __builtin_expect(!!(x), 0)  // x 很可能为假
+#define XMD_PREFETCH(p) __builtin_prefetch(static_cast<const void*>(p), 1, 3)  // 读预取，高局部性
 #else
-#define KAMA_LIKELY(x) (x)
-#define KAMA_UNLIKELY(x) (x)
+#define XMD_LIKELY(x) (x)
+#define XMD_UNLIKELY(x) (x)
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))  // MSVC + x86
-#define KAMA_PREFETCH(p) _mm_prefetch(static_cast<const char*>(static_cast<const void*>(p)), _MM_HINT_T0)
+#define XMD_PREFETCH(p) _mm_prefetch(static_cast<const char*>(static_cast<const void*>(p)), _MM_HINT_T0)
 #else
-#define KAMA_PREFETCH(p) ((void)0)  // 其他架构不预取
+#define XMD_PREFETCH(p) ((void)0)  // 其他架构不预取
 #endif
 #endif
 
@@ -239,4 +239,4 @@ void recordCentralFlush(size_t index, size_t count);
 void recordThreadCacheHit(size_t index);
 void recordThreadCacheMiss(size_t index);
 
-} // namespace Kama_memoryPool
+} // namespace xmd_memoryPool

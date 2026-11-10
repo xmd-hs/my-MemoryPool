@@ -1,10 +1,9 @@
-#!/bin/bash
-set -e
-cd /home/xmd/kama-mp
-./build-asan/unit_test > build-asan/out.txt 2>&1 || true
-echo "ASAN_EXIT=$?"
-tail -30 build-asan/out.txt
-echo "===="
-./build/unit_test > build/unit.txt 2>&1 || true
-echo "UNIT_EXIT=$?"
-tail -30 build/unit.txt
+#!/usr/bin/env bash
+set -euo pipefail
+source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+build_dir="${1:-${source_dir}/build-linux-unit}"
+cmake -S "${source_dir}" -B "${build_dir}" -DCMAKE_BUILD_TYPE=Debug \
+  -DXMD_MEMORY_POOL_BUILD_TESTS=ON -DXMD_MEMORY_POOL_ENABLE_DEBUG_GUARDS=ON \
+  -DXMD_MEMORY_POOL_ENABLE_ASAN=ON -DXMD_MEMORY_POOL_ENABLE_UBSAN=ON
+cmake --build "${build_dir}" --parallel
+ctest --test-dir "${build_dir}" -R xmd_unit_test --output-on-failure

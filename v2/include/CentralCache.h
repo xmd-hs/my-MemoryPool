@@ -25,7 +25,7 @@
 #include <chrono>
 #include <unordered_map>
 
-namespace Kama_memoryPool
+namespace xmd_memoryPool
 {
 
 // Span 追踪器：记录从 PageCache 拿的一整块内存（span）的信息
